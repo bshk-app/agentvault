@@ -68,3 +68,32 @@ func (m *Matcher) hasFormWithPrefix(s string) bool {
 	}
 	return false
 }
+
+// straddleStart reports the earliest start index of any complete form occurrence
+// in s that strictly straddles cut (i.e. occurs at [start, end) with
+// start < cut < end). It returns (start, true) for the minimum such start, or
+// (0, false) if no occurrence straddles cut. The streaming redactor uses this to
+// pull a tentative cut back so it never bisects a complete secret occurrence.
+func (m *Matcher) straddleStart(s string, cut int) (int, bool) {
+	min := -1
+	for _, form := range m.ordered {
+		for off := 0; ; {
+			i := strings.Index(s[off:], form)
+			if i < 0 {
+				break
+			}
+			start := off + i
+			end := start + len(form)
+			if start < cut && cut < end {
+				if min < 0 || start < min {
+					min = start
+				}
+			}
+			off = start + 1 // allow overlapping occurrences
+		}
+	}
+	if min < 0 {
+		return 0, false
+	}
+	return min, true
+}
