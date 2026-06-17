@@ -57,3 +57,14 @@ func (m *Matcher) Mask(s string) string {
 	}
 	return s
 }
+
+// hasFormWithPrefix reports whether some known form is strictly longer than s and
+// begins with s. Used by the streaming redactor to decide what to retain.
+func (m *Matcher) hasFormWithPrefix(s string) bool {
+	for _, form := range m.ordered {
+		if len(form) > len(s) && strings.HasPrefix(form, s) {
+			return true
+		}
+	}
+	return false
+}
