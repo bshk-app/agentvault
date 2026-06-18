@@ -8,8 +8,9 @@ package daemon
 #include <stdlib.h>
 
 // av_touchid_prompt is implemented in touchid_darwin.m (compiled by cgo on
-// darwin). Return codes: 0=success, 1=cancel/auth-failure, 2=policy
-// unavailable/error.
+// darwin). Return codes: 0=success, 1=cancel/auth-failure/timeout, 2=policy
+// unavailable/error. The native side bounds the wait and fails closed (returns
+// 1) on timeout, so an unanswered prompt never parks the resolving goroutine.
 int av_touchid_prompt(const char *reason);
 */
 import "C"
@@ -34,8 +35,9 @@ func newTouchIDPresence() (Presence, error) {
 func NewTouchIDPresence() (Presence, error) { return newTouchIDPresence() }
 
 // Prompt blocks until the user responds to the native LocalAuthentication
-// dialog. success -> nil; user cancel/failure -> ErrDenied; policy
-// unavailable/system error -> ErrLocked.
+// dialog OR the native bounded wait times out. success -> nil; user
+// cancel/failure/timeout -> ErrDenied (fail-closed); policy unavailable/system
+// error -> ErrLocked.
 func (touchIDPresence) Prompt(reason string) error {
 	cr := C.CString(reason)
 	defer C.free(unsafe.Pointer(cr))

@@ -21,10 +21,11 @@ import (
 	"github.com/beshkenadze/agentvault/internal/transport"
 )
 
-// unlockTTL is the default window an "unlock" RPC opens the session for. It is the
-// single source of truth for the unlock duration; the resolver refreshes the
-// deadline per issued value via session.Issue (session.ttl).
-const unlockTTL = 15 * time.Minute
+// DefaultTTL is the single source of truth for the session window: it is the TTL
+// cmd/avd passes to NewSession AND the window the "unlock" RPC opens the session for,
+// so the unlock duration and the session's default TTL can never drift. The resolver
+// refreshes the deadline per issued value via session.Issue (session.ttl).
+const DefaultTTL = 15 * time.Minute
 
 // connIdleTimeout bounds how long a connection may sit IDLE between requests
 // before the daemon reaps it, so a peer that connects and then stalls can't park
@@ -277,7 +278,7 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		return ipc.Response{ID: req.ID, Result: res}
 	case "unlock":
 		// The call that fires Touch ID in production: one presence Prompt opens the
-		// session for unlockTTL. A denied presence maps to CodeDenied; no presence
+		// session for DefaultTTL. A denied presence maps to CodeDenied; no presence
 		// available (ErrLocked) maps to CodeLocked.
 		if s.presence == nil {
 			return errResp(req.ID, ipc.CodeInternal, "presence not configured")
@@ -292,7 +293,7 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 			}
 			return errResp(req.ID, code, err.Error())
 		}
-		s.session.Unlock(unlockTTL)
+		s.session.Unlock(DefaultTTL)
 		s.audit.Log(audit.Event{Kind: "unlock"})
 		return statusResponse(req.ID, s.session)
 	case "lock":

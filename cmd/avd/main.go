@@ -8,7 +8,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"filippo.io/age"
 
@@ -19,10 +18,6 @@ import (
 	"github.com/beshkenadze/agentvault/internal/detect/gitleaks"
 	"github.com/beshkenadze/agentvault/internal/transport"
 )
-
-// sessionTTL is how long an issued value stays in the session redactor before the
-// session clears (15 min per the design; auto-lock-on-screen-lock is Phase 5).
-const sessionTTL = 15 * time.Minute
 
 func main() {
 	path, err := transport.DefaultSocketPath()
@@ -39,7 +34,11 @@ func main() {
 	// secret value itself; the agefile backend decrypts inside avd on demand.
 	reg := backend.NewRegistry()
 	registerBackends(reg)
-	sess := daemon.NewSession(sessionTTL)
+	// daemon.DefaultTTL is the single source of truth for the session window: the
+	// same const the unlock RPC uses (server.go), so the session TTL and the unlock
+	// duration can never drift. Issued values clear after this window; auto-lock on
+	// screen-lock/sleep (StartAutoLock below, landed in Phase 5) re-locks earlier.
+	sess := daemon.NewSession(daemon.DefaultTTL)
 
 	// Layer-2 net: wire the gitleaks detector into the session so scrub catches
 	// DERIVED secrets the daemon never issued and dangerous-tier values that are never
