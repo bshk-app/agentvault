@@ -26,6 +26,15 @@ import (
 // deadline per issued value via session.Issue (session.ttl).
 const unlockTTL = 15 * time.Minute
 
+// connIdleTimeout bounds how long a connection may sit IDLE between requests
+// before the daemon reaps it, so a peer that connects and then stalls can't park
+// a goroutine forever. It is deliberately GENEROUS: the deadline is reset per
+// request (before each Decode and before each Encode in handle), so a long but
+// active stream — `av scrub` piping tool output with gaps — is never killed; only
+// a peer that goes silent for the whole window times out. `av run`'s single quick
+// resolve RPC is trivially within it.
+const connIdleTimeout = 5 * time.Minute
+
 // Server owns the unix-socket listener and serves the JSON-RPC dispatch.
 type Server struct {
 	ln       net.Listener
@@ -52,6 +61,11 @@ type Server struct {
 	// audit.NopLogger; injected via SetAudit (the real daemon wires a FileLogger).
 	// SECURITY: only Kind is recorded for unlock/lock — no value can reach it.
 	audit audit.Logger
+	// idleTimeout bounds the per-connection idle deadline in handle. It defaults to
+	// connIdleTimeout in New; it is an injectable seam so the reap-on-stall path is
+	// testable without a multi-minute wait (a test sets a tiny value). It is reset
+	// per request, so it gates IDLE time between requests, not total stream time.
+	idleTimeout time.Duration
 }
 
 // SetPresence injects the presence used by the "unlock" RPC. Call it after New and
@@ -137,7 +151,7 @@ func New(path string) (*Server, error) {
 		releaseLock(lock, lockPath)
 		return nil, err
 	}
-	return &Server{ln: ln, lock: lock, lockPath: lockPath, checkPeer: transport.CheckPeer, audit: audit.NopLogger{}}, nil
+	return &Server{ln: ln, lock: lock, lockPath: lockPath, checkPeer: transport.CheckPeer, audit: audit.NopLogger{}, idleTimeout: connIdleTimeout}, nil
 }
 
 // releaseLock drops the flock, closes the fd, and best-effort removes the
@@ -175,14 +189,28 @@ func (s *Server) handle(c net.Conn) {
 	enc := ipc.NewEncoder(c)
 	cs := &connState{} // per-connection scrub state; fresh per connection
 	for {
+		// Reset the idle deadline per request: a stalled/silent peer is reaped after
+		// idleTimeout, but an active stream (each request bumps the deadline) is not.
+		// A zero idleTimeout disables the deadline (SetReadDeadline(zero) = no limit).
+		_ = c.SetReadDeadline(s.idleDeadline())
 		var req ipc.Request
 		if err := dec.Decode(&req); err != nil {
-			return // EOF / closed
+			return // EOF / closed / idle deadline exceeded
 		}
+		_ = c.SetWriteDeadline(s.idleDeadline())
 		if err := enc.Encode(s.dispatch(cs, req)); err != nil {
 			return
 		}
 	}
+}
+
+// idleDeadline returns the absolute deadline for the next read/write, or the zero
+// time (no deadline) when idleTimeout is unset, so handle can call it uniformly.
+func (s *Server) idleDeadline() time.Time {
+	if s.idleTimeout <= 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(s.idleTimeout)
 }
 
 // dispatch routes a request to its handler. cs carries per-connection scrub state;
