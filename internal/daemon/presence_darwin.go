@@ -3,6 +3,7 @@
 package daemon
 
 /*
+#cgo CFLAGS: -fobjc-arc
 #cgo LDFLAGS: -framework LocalAuthentication -framework Foundation
 #include <stdlib.h>
 
