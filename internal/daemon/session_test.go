@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"testing"
 	"time"
 )
@@ -183,4 +184,83 @@ func TestSessionReissueAfterExpiryDropsOldValue(t *testing.T) {
 	if got := r.Redact("newval"); got == "newval" {
 		t.Fatalf("new value not masked after re-issue: %q", got)
 	}
+}
+
+// ZEROIZE on Lock (load-bearing): after Lock() the at-rest buffer that held the
+// issued value must be overwritten with zeros — the secret is destroyed, not merely
+// dereferenced. We hold a reference to the protected buffer captured BEFORE Lock and
+// assert its backing bytes are all zero afterward. This is the observable proof of
+// memguard-style zeroize that the no-resurface tests (above) only prove indirectly.
+func TestSessionLockZeroizesBuffer(t *testing.T) {
+	s := NewSession(15 * time.Minute)
+	s.Unlock(15 * time.Minute)
+	s.Issue("TOKEN", "ghp_secret_value")
+
+	buf := s.issued["TOKEN"] // capture the live buffer before Lock destroys the map entry
+	if buf == nil {
+		t.Fatal("Issue must store a protected buffer for the value")
+	}
+	if buf.String() != "ghp_secret_value" {
+		t.Fatalf("buffer String() = %q, want the issued value", buf.String())
+	}
+	// Capture the backing array NOW; Destroy zeroes it in place but nils lv.buf, so we
+	// must hold the slice header before Lock to observe the zeroed bytes after.
+	backing := buf.bytesForTest()
+	if len(backing) == 0 {
+		t.Fatal("buffer must hold the value bytes before Lock")
+	}
+
+	s.Lock()
+
+	if !allZero(backing) {
+		t.Fatalf("Lock must zeroize the buffer bytes, got %v", backing)
+	}
+}
+
+// ZEROIZE on TTL-expiry-driven clear: Issue into an expired window clears (and
+// destroys) the stale buffer. Capture the stale buffer before the expired Issue and
+// assert it was zeroized, not just dropped.
+func TestSessionExpiryClearZeroizesBuffer(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	cur := base
+	s := NewSession(10 * time.Minute)
+	s.now = func() time.Time { return cur }
+	s.Unlock(10 * time.Minute)
+
+	s.Issue("OLD", "stale_secret")
+	stale := s.issued["OLD"]
+	if stale == nil {
+		t.Fatal("Issue must store a protected buffer")
+	}
+	backing := stale.bytesForTest()
+
+	cur = base.Add(11 * time.Minute) // advance past the deadline => expired/closed
+	s.Issue("OLD", "ignored")        // expired Issue is a no-op that clears+destroys the stale set
+
+	if !allZero(backing) {
+		t.Fatalf("expired-clear must zeroize the stale buffer, got %v", backing)
+	}
+}
+
+// Re-issuing the same NAME must destroy (zeroize) the prior buffer for that name, not
+// leak it.
+func TestSessionReissueSameNameZeroizesPrior(t *testing.T) {
+	s := NewSession(15 * time.Minute)
+	s.Unlock(15 * time.Minute)
+	s.Issue("TOKEN", "first_value")
+	prior := s.issued["TOKEN"]
+	backing := prior.bytesForTest()
+
+	s.Issue("TOKEN", "second_value") // replace must Destroy the prior buffer
+
+	if !allZero(backing) {
+		t.Fatalf("re-issue of same name must zeroize the prior buffer, got %v", backing)
+	}
+	if got := s.Redactor().Redact("second_value"); got == "second_value" {
+		t.Fatal("new value for re-issued name must be masked")
+	}
+}
+
+func allZero(b []byte) bool {
+	return bytes.Equal(b, make([]byte, len(b)))
 }

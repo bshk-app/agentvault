@@ -82,9 +82,12 @@ func Run(cl *Client, opts RunOptions, stdout, stderr io.Writer) (exitCode int, e
 		flushErr = cerr
 	}
 
-	// Best-effort zeroize: drop references so the values are eligible for GC.
-	// Go strings are immutable, so this cannot scrub the backing bytes — Phase 6
-	// memguard hardens Secret.Value. Clearing the maps/secrets is the most we can do.
+	// Best-effort zeroize: drop references so the values are eligible for GC. Go strings
+	// are immutable, so this cannot scrub the backing bytes; av stays thin (no memguard),
+	// and the env-injected child inherently needs cleartext, so this is the most av can
+	// do here. The canonical at-rest protection lives in avd's session (mlock + zeroize
+	// of issued values); see internal/daemon/secmem.go. Clearing maps/secrets drops the
+	// last av-side references promptly.
 	clear(vals)
 	for i := range secrets {
 		secrets[i] = redact.Secret{}

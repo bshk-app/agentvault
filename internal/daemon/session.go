@@ -14,6 +14,19 @@ import (
 // Unlock is called; while locked (or once the unlock TTL elapses) the redactor/matcher
 // mask nothing and the session is treated as closed. Unlock opens it for a TTL; Lock
 // (av lock / auto-lock) and TTL expiry both re-lock and clear issued values.
+//
+// Phase 6 (memguard-style at-rest protection): issued values are held in lockedValue
+// buffers — the bytes are mlocked (no swap) on Issue and ZEROIZED (overwritten with
+// zeros, then munlocked) on Lock / expiry-driven clear / re-issue. This protects the
+// canonical AT-REST stored value.
+//
+// DOCUMENTED LIMITATION (scope honesty): the redactor's Matcher needs CLEARTEXT to
+// build its masking forms, so Redactor()/Matcher() read each buffer's String() into a
+// transient normal-Go-memory copy while building redact.Secret. Those transient
+// cleartext FORMS (and the derived encodings the matcher generates) are NOT protected —
+// protecting every transient copy is out of scope because the masker fundamentally
+// needs cleartext to match. memguard here protects the at-rest session values, not the
+// matcher's transient working set.
 type Session struct {
 	ttl time.Duration
 	now func() time.Time
@@ -21,14 +34,14 @@ type Session struct {
 	mu       sync.Mutex
 	unlocked bool // fresh sessions are locked until Unlock
 	deadline time.Time
-	issued   map[string]string // logical name -> value (for redaction + {{AV:NAME}})
-	det      redact.Detector   // optional gitleaks detector for layer 2
+	issued   map[string]*lockedValue // logical name -> protected value (mlock + zeroize)
+	det      redact.Detector         // optional gitleaks detector for layer 2
 }
 
 // NewSession returns a LOCKED session with the given default TTL. The session must be
 // opened with Unlock before issued values are honored.
 func NewSession(ttl time.Duration) *Session {
-	return &Session{ttl: ttl, now: time.Now, issued: map[string]string{}}
+	return &Session{ttl: ttl, now: time.Now, issued: map[string]*lockedValue{}}
 }
 
 // WithDetector sets the gitleaks detector used by the scrub redactor.
@@ -39,13 +52,23 @@ func (s *Session) WithDetector(d redact.Detector) *Session {
 	return s
 }
 
+// destroyIssuedLocked zeroizes (and munlocks) every protected buffer, then resets the
+// map. SSOT for every clear path (Unlock / Issue-into-closed / Lock): a value is never
+// merely dropped, it is overwritten. Caller must hold s.mu.
+func (s *Session) destroyIssuedLocked() {
+	for _, lv := range s.issued {
+		lv.Destroy()
+	}
+	s.issued = map[string]*lockedValue{}
+}
+
 // Unlock opens the session for the given TTL: it marks the session unlocked, sets the
-// deadline to now+ttl, and clears any stale values left from a previously-expired
-// window so they cannot resurface.
+// deadline to now+ttl, and clears (zeroizing) any stale values left from a
+// previously-expired window so they cannot resurface.
 func (s *Session) Unlock(ttl time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.issued = map[string]string{}
+	s.destroyIssuedLocked()
 	s.unlocked = true
 	s.deadline = s.now().Add(ttl)
 }
@@ -82,10 +105,13 @@ func (s *Session) Issue(name, value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lockedLocked() {
-		s.issued = map[string]string{} // drop any stale values; do not record into a closed session
+		s.destroyIssuedLocked() // zeroize+drop stale values; do not record into a closed session
 		return
 	}
-	s.issued[name] = value
+	if prior := s.issued[name]; prior != nil {
+		prior.Destroy() // zeroize the buffer being replaced — never leak it
+	}
+	s.issued[name] = newLockedValue(value)
 	s.deadline = s.now().Add(s.ttl)
 }
 
@@ -105,8 +131,10 @@ func (s *Session) Redactor() *redact.Redactor {
 	defer s.mu.Unlock()
 	var secrets []redact.Secret
 	if !s.lockedLocked() {
-		for name, val := range s.issued {
-			secrets = append(secrets, redact.Secret{Name: name, Value: val})
+		for name, lv := range s.issued {
+			// Transient cleartext: lv.String() copies into normal Go memory only for the
+			// span of building the redact.Secret (the documented matcher-forms limitation).
+			secrets = append(secrets, redact.Secret{Name: name, Value: lv.String()})
 		}
 	}
 	return redact.NewRedactor(secrets, redact.Options{Detector: s.det})
@@ -123,8 +151,9 @@ func (s *Session) Matcher() *redact.Matcher {
 	defer s.mu.Unlock()
 	var secrets []redact.Secret
 	if !s.lockedLocked() {
-		for name, val := range s.issued {
-			secrets = append(secrets, redact.Secret{Name: name, Value: val})
+		for name, lv := range s.issued {
+			// Transient cleartext (documented matcher-forms limitation): see Redactor.
+			secrets = append(secrets, redact.Secret{Name: name, Value: lv.String()})
 		}
 	}
 	return redact.NewMatcher(secrets)
@@ -143,13 +172,12 @@ func (s *Session) Detector() redact.Detector {
 	return s.det
 }
 
-// Lock re-locks the session and clears all issued values (used by av lock / TTL expiry
-// / Phase 5 auto-lock).
+// Lock re-locks the session and ZEROIZES + clears all issued values (used by av lock /
+// TTL expiry / Phase 5 auto-lock / rate-limit force-relock). Each protected buffer is
+// overwritten with zeros and munlocked — the secret is destroyed, not merely dropped.
 func (s *Session) Lock() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.unlocked = false
-	for k := range s.issued {
-		delete(s.issued, k)
-	}
+	s.destroyIssuedLocked()
 }
