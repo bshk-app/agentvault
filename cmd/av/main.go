@@ -20,11 +20,13 @@ import (
 //	2    bad request — usage error or CodeBadRequest (e.g. profile not found)
 //	69   vault locked (CodeLocked) — a human must unlock; cf. EX_UNAVAILABLE
 //	77   access denied (CodeDenied, dangerous-tier) — cf. EX_NOPERM
+//	80   av read refused (stdout is not a terminal — the secret would leak to a pipe)
 const (
-	exitGeneric    = 1
-	exitBadRequest = 2
-	exitLocked     = 69
-	exitDenied     = 77
+	exitGeneric     = 1
+	exitBadRequest  = 2
+	exitLocked      = 69
+	exitDenied      = 77
+	exitReadRefused = 80
 )
 
 func main() {
@@ -37,6 +39,8 @@ func main() {
 		runPing()
 	case "run":
 		runRun(os.Args[2:])
+	case "read":
+		runRead(os.Args[2:])
 	case "unlock":
 		runUnlock()
 	case "lock":
@@ -52,7 +56,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--profile P] NAME  (prints a secret to a TTY only; refuses a pipe)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)")
 }
 
 func runPing() {
@@ -95,6 +99,61 @@ func runRun(args []string) {
 		os.Exit(exitForError(err))
 	}
 	os.Exit(code)
+}
+
+// runRead parses `av read [--profile P] NAME`, resolves the single logical name
+// through the daemon, and prints its value — BUT ONLY to a terminal. If stdout is
+// not a TTY (a pipe/file), client.Read refuses (writes nothing of the value) and
+// returns exit 80, so an agent piping the output gets nothing (it must use av run).
+//
+// SECURITY: TTY status is computed here from the REAL os.Stdout via the stdlib
+// os.ModeCharDevice (no new dependency); client.Read takes it as a parameter so
+// the refusal branch is unit-testable without a terminal.
+func runRead(args []string) {
+	profile := "smoke" // default profile; override with --profile
+	name, err := parseReadArgs(args, &profile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		usage()
+		os.Exit(exitBadRequest)
+	}
+
+	path, err := transport.DefaultSocketPath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		os.Exit(exitGeneric)
+	}
+
+	code, err := client.Read(client.New(path), client.ReadOptions{
+		Profile: profile,
+		Name:    name,
+	}, os.Stdout, stdoutIsTTY())
+	if err != nil {
+		// A *ipc.RPCError (resolve: locked/denied/bad-request) maps via exitForError.
+		// Otherwise client.Read already chose the exit code (refused=80, missing
+		// name=2, IO=-1); print the secret-free message and use that code.
+		var rpc *ipc.RPCError
+		if errors.As(err, &rpc) {
+			os.Exit(exitForError(err))
+		}
+		fmt.Fprintln(os.Stderr, "av:", err)
+		if code <= 0 {
+			code = exitGeneric
+		}
+		os.Exit(code)
+	}
+	os.Exit(code)
+}
+
+// stdoutIsTTY reports whether os.Stdout is a terminal (a character device) using
+// the stdlib only (no golang.org/x/term dependency — av stays minimal). A pipe or
+// a regular file is NOT a character device, so this returns false for them.
+func stdoutIsTTY() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false // on doubt, treat as non-TTY (the safe, refusing direction)
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // runUnlock issues the "unlock" RPC — the call that fires Touch ID in production —
@@ -182,6 +241,36 @@ func runScrub() {
 	if err := client.New(path).Scrub(os.Stdin, os.Stdout); err != nil {
 		os.Exit(exitForError(err))
 	}
+}
+
+// parseReadArgs extracts --profile and the single positional NAME from
+// `av read [--profile P] NAME`. Exactly one positional name is required.
+func parseReadArgs(args []string, profile *string) (string, error) {
+	var name string
+	have := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--profile":
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--profile needs a value")
+			}
+			*profile = args[i+1]
+			i++
+		case len(a) > 10 && a[:10] == "--profile=":
+			*profile = a[10:]
+		default:
+			if have {
+				return "", fmt.Errorf("av read takes exactly one NAME")
+			}
+			name = a
+			have = true
+		}
+	}
+	if !have {
+		return "", fmt.Errorf("av read needs a NAME (use: av read [--profile P] NAME)")
+	}
+	return name, nil
 }
 
 // parseRunArgs extracts --profile and the child argv (everything after `--`, or
