@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/beshkenadze/agentvault/internal/audit"
 	"github.com/beshkenadze/agentvault/internal/backend"
 	"github.com/beshkenadze/agentvault/internal/manifest"
 )
@@ -29,6 +30,11 @@ type Resolver struct {
 	sess     *Session
 	limiter  *rateLimiter
 	onAlert  func(reason string)
+	// audit records ONE metadata-only entry per dangerous touch (issuance per tier,
+	// denied access, and — via onAlert — rate-limit trips). Default audit.NopLogger,
+	// so existing call sites/tests are unchanged. SECURITY: only names/tiers/profiles/
+	// reasons are passed, NEVER a value (the Event type has no value field).
+	audit audit.Logger
 }
 
 // Option configures a Resolver. The zero-option NewResolver is fully functional: it
@@ -40,8 +46,22 @@ type Option func(*Resolver)
 func WithRateLimiter(rl *rateLimiter) Option { return func(r *Resolver) { r.limiter = rl } }
 
 // WithAlertHook sets the callback fired (with a SECRET-FREE reason) when the limiter
-// trips. Task A3 wires this to the append-only audit log; the default is a no-op.
+// trips. WithAudit installs a hook that routes the reason to the audit log; an explicit
+// WithAlertHook still overrides it. The default is a no-op.
 func WithAlertHook(fn func(reason string)) Option { return func(r *Resolver) { r.onAlert = fn } }
+
+// WithAudit injects the audit sink and, unless an explicit WithAlertHook was given,
+// routes the rate-limit alert into it as a secret-free Kind:"alert" event. The default
+// is audit.NopLogger (off), so existing tests and behavior are unchanged.
+func WithAudit(l audit.Logger) Option {
+	return func(r *Resolver) {
+		if l == nil {
+			return
+		}
+		r.audit = l
+		r.onAlert = func(reason string) { l.Log(audit.Event{Kind: "alert", Detail: reason}) }
+	}
+}
 
 func NewResolver(reg *backend.Registry, presence Presence, sess *Session, opts ...Option) *Resolver {
 	r := &Resolver{
@@ -49,7 +69,8 @@ func NewResolver(reg *backend.Registry, presence Presence, sess *Session, opts .
 		presence: presence,
 		sess:     sess,
 		limiter:  newRateLimiter(),
-		onAlert:  func(string) {}, // no-op until A3 wires the audit log
+		onAlert:  func(string) {}, // no-op until WithAudit/WithAlertHook wires it
+		audit:    audit.NopLogger{},
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -101,6 +122,8 @@ func (r *Resolver) Resolve(profile string, manifestBytes []byte) (map[string]str
 		case manifest.TierDangerous:
 			// Fresh presence per dangerous secret; never cached.
 			if err := r.presence.Prompt(fmt.Sprintf("Allow %q to use %s", profile, name)); err != nil {
+				// Audit the denial (metadata only — name+tier, never a value).
+				r.audit.Log(audit.Event{Kind: "denied", Name: name, Tier: string(e.Tier), Profile: profile})
 				return nil, ErrDenied
 			}
 		default:
@@ -127,6 +150,10 @@ func (r *Resolver) Resolve(profile string, manifestBytes []byte) (map[string]str
 		if e.Tier == manifest.TierNormal {
 			r.sess.Issue(name, sec.Value) // cache normal-tier only; dangerous is NEVER issued
 		}
+		// Append-only audit: ONE entry per issuance, BOTH tiers ("one entry per
+		// dangerous touch"). SECURITY: name/tier/profile only — sec.Value is NEVER
+		// passed (the Event type has no value field).
+		r.audit.Log(audit.Event{Kind: "issue", Name: name, Tier: string(e.Tier), Profile: profile})
 	}
 	return out, nil
 }

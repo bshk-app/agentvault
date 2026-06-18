@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/beshkenadze/agentvault/internal/audit"
 	"github.com/beshkenadze/agentvault/internal/ipc"
 	"github.com/beshkenadze/agentvault/internal/redact"
 	"github.com/beshkenadze/agentvault/internal/transport"
@@ -47,12 +48,25 @@ type Server struct {
 	// SetPresence and MUST be the SAME presence the resolver holds, so unlock and
 	// dangerous-tier resolve share one auth seam.
 	presence Presence
+	// audit records ONE metadata-only entry per unlock and lock. Default
+	// audit.NopLogger; injected via SetAudit (the real daemon wires a FileLogger).
+	// SECURITY: only Kind is recorded for unlock/lock — no value can reach it.
+	audit audit.Logger
 }
 
 // SetPresence injects the presence used by the "unlock" RPC. Call it after New and
 // before Serve, with the SAME Presence passed to NewResolver so unlock and
 // dangerous-tier resolve share one auth seam.
 func (s *Server) SetPresence(p Presence) { s.presence = p }
+
+// SetAudit injects the audit sink used to record unlock/lock events. Pass the SAME
+// audit.Logger given to the resolver (WithAudit) so the whole daemon writes one log.
+// A nil logger is ignored (the default NopLogger stays). Call after New, before Serve.
+func (s *Server) SetAudit(l audit.Logger) {
+	if l != nil {
+		s.audit = l
+	}
+}
 
 // SetResolver injects the resolver used by the "resolve" method and captures its
 // session for the scrub stream. Call it after New and before Serve. Keeping
@@ -123,7 +137,7 @@ func New(path string) (*Server, error) {
 		releaseLock(lock, lockPath)
 		return nil, err
 	}
-	return &Server{ln: ln, lock: lock, lockPath: lockPath, checkPeer: transport.CheckPeer}, nil
+	return &Server{ln: ln, lock: lock, lockPath: lockPath, checkPeer: transport.CheckPeer, audit: audit.NopLogger{}}, nil
 }
 
 // releaseLock drops the flock, closes the fd, and best-effort removes the
@@ -223,12 +237,14 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 			return errResp(req.ID, code, err.Error())
 		}
 		s.session.Unlock(unlockTTL)
+		s.audit.Log(audit.Event{Kind: "unlock"})
 		return statusResponse(req.ID, s.session)
 	case "lock":
 		if s.session == nil {
 			return errResp(req.ID, ipc.CodeInternal, "session not configured")
 		}
 		s.session.Lock()
+		s.audit.Log(audit.Event{Kind: "lock"})
 		return statusResponse(req.ID, s.session)
 	case "status":
 		if s.session == nil {

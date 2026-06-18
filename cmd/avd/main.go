@@ -5,11 +5,13 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"filippo.io/age"
 
+	"github.com/beshkenadze/agentvault/internal/audit"
 	"github.com/beshkenadze/agentvault/internal/backend"
 	"github.com/beshkenadze/agentvault/internal/backend/agefile"
 	"github.com/beshkenadze/agentvault/internal/daemon"
@@ -42,8 +44,17 @@ func main() {
 	// through the same auth seam. Production uses real Touch ID; AV_TEST_AUTH=allow
 	// selects the env-gated stub so e2e/CI stay automatable without a biometric prompt.
 	presence := selectPresence()
-	srv.SetResolver(daemon.NewResolver(reg, presence, sess))
+
+	// Append-only audit log (default-on for the real daemon): one metadata-only entry
+	// per dangerous touch — issuance, unlock, lock, rate-limit alert, denied access. It
+	// lives alongside the socket (user dir, 0600). SECURITY: only names/tiers/profiles/
+	// reasons are written — NEVER a value (audit.Event has no value field). On open
+	// failure we fall back to the NopLogger rather than refuse to start: audit is
+	// defense-in-depth, not a hard dependency of brokering.
+	auditLog := openAuditLog(path)
+	srv.SetResolver(daemon.NewResolver(reg, presence, sess, daemon.WithAudit(auditLog)))
 	srv.SetPresence(presence)
+	srv.SetAudit(auditLog)
 
 	// Auto-lock observers (screen-lock/sleep on darwin; no-op elsewhere) re-lock the
 	// SAME session. stop() removes them on shutdown.
@@ -76,6 +87,21 @@ func selectPresence() daemon.Presence {
 		log.Fatalf("avd: presence: %v", err)
 	}
 	return p
+}
+
+// openAuditLog opens the append-only audit log next to the socket (audit.jsonl in the
+// same user dir, which daemon.New already created 0700). On any open error it logs the
+// reason (no key material) and returns a NopLogger so the daemon still runs — audit is
+// defense-in-depth, never a blocker for brokering.
+func openAuditLog(socketPath string) audit.Logger {
+	auditPath := filepath.Join(filepath.Dir(socketPath), "audit.jsonl")
+	l, err := audit.NewFileLogger(auditPath)
+	if err != nil {
+		log.Printf("avd: audit log disabled: %v", err)
+		return audit.NopLogger{}
+	}
+	log.Printf("avd: audit log enabled")
+	return l
 }
 
 // registerBackends registers the secret backends configured via env. Phase 4 wires
