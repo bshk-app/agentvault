@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"filippo.io/age"
@@ -14,6 +15,7 @@ import (
 	"github.com/beshkenadze/agentvault/internal/audit"
 	"github.com/beshkenadze/agentvault/internal/backend"
 	"github.com/beshkenadze/agentvault/internal/backend/agefile"
+	"github.com/beshkenadze/agentvault/internal/backend/onepassword"
 	"github.com/beshkenadze/agentvault/internal/daemon"
 	"github.com/beshkenadze/agentvault/internal/detect/gitleaks"
 	"github.com/beshkenadze/agentvault/internal/transport"
@@ -120,31 +122,43 @@ func openAuditLog(socketPath string) audit.Logger {
 	return l
 }
 
-// registerBackends registers the secret backends configured via env. Phase 4 wires
-// only the age-file backend ("file") when both AV_AGE_IDENTITY and AV_AGE_VAULT are
-// set; if either is unset it skips registration (the daemon still runs, and a
-// resolve of av://file/... returns a "no backend registered" error). It logs which
-// ids were registered to the daemon's own stderr — NEVER a secret value.
+// registerBackends registers the secret backends. The age-file backend ("file") is
+// wired only when both AV_AGE_IDENTITY and AV_AGE_VAULT are set; if either is unset it
+// is skipped (the daemon still runs, and a resolve of av://file/... returns a "no
+// backend registered" error). The 1Password backend ("1p") is registered
+// UNCONDITIONALLY: it is lazy — it never touches the `op` binary at registration time,
+// only on Resolve — so wiring it costs nothing until a av://1p/... ref is resolved
+// (which then requires `op` installed + signed in; see internal/backend/onepassword).
+// It logs which ids were registered to the daemon's own stderr — NEVER a secret value.
 //
-// SECURITY: the identity is loaded here only to construct the backend; the plaintext
+// SECURITY: the age identity is loaded here only to construct the backend; the plaintext
 // vault is decrypted lazily inside the backend on each Resolve. Phase 6 wraps the
 // identity in the Secure Enclave; this function is the seam for that change.
 func registerBackends(reg *backend.Registry) {
+	registered := []string{}
+
 	idPath := os.Getenv("AV_AGE_IDENTITY")
 	vaultPath := os.Getenv("AV_AGE_VAULT")
-	if idPath == "" || vaultPath == "" {
+	switch {
+	case idPath == "" || vaultPath == "":
 		log.Printf("avd: no file backend (set AV_AGE_IDENTITY and AV_AGE_VAULT to enable)")
-		return
+	default:
+		id, err := loadAgeIdentity(idPath)
+		if err != nil {
+			// The error carries only the path and a parse reason, never key material.
+			log.Printf("avd: file backend disabled: %v", err)
+		} else {
+			reg.Register("file", agefile.New(id, vaultPath))
+			registered = append(registered, "file")
+		}
 	}
 
-	id, err := loadAgeIdentity(idPath)
-	if err != nil {
-		// The error carries only the path and a parse reason, never key material.
-		log.Printf("avd: file backend disabled: %v", err)
-		return
-	}
-	reg.Register("file", agefile.New(id, vaultPath))
-	log.Printf("avd: registered backends: file")
+	// Lazy: registering does not invoke `op`. Resolve of av://1p/... shells out to the
+	// real `op read` and needs `op` installed + signed in (verified manually, not in CI).
+	reg.Register("1p", onepassword.New())
+	registered = append(registered, "1p")
+
+	log.Printf("avd: registered backends: %s", strings.Join(registered, " "))
 }
 
 // loadAgeIdentity reads an age identity file and returns its first identity.
