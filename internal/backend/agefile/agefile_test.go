@@ -1,8 +1,7 @@
 package agefile
 
 import (
-	"bytes"
-	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,23 +10,16 @@ import (
 	"github.com/beshkenadze/agentvault/internal/backend"
 )
 
-// writeEncrypted age-encrypts a name->value map to path for the given recipient.
+// writeEncrypted age-encrypts a name->value map to path for the given recipient,
+// delegating the encrypt logic to the package's exported EncryptVault helper.
 func writeEncrypted(t *testing.T, path string, id *age.X25519Identity, data map[string]string) {
 	t.Helper()
-	plain, _ := json.Marshal(data)
 	f, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	w, err := age.Encrypt(f, id.Recipient())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write(plain); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
+	if err := EncryptVault(f, id.Recipient(), data); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -66,7 +58,6 @@ func TestResolveAndList(t *testing.T) {
 		t.Fatalf("got %d metas, want 2", len(metas))
 	}
 	// List must not expose values (Meta has no Value field — compile-time guard).
-	_ = bytes.TrimSpace
 }
 
 func TestWrongIdentityFails(t *testing.T) {
@@ -77,7 +68,14 @@ func TestWrongIdentityFails(t *testing.T) {
 	writeEncrypted(t, path, id, map[string]string{"X": "y"})
 
 	b := New(other, path) // wrong identity
-	if _, err := b.Resolve("X"); err == nil {
+	_, err := b.Resolve("X")
+	if err == nil {
 		t.Fatal("expected decryption failure with wrong identity")
+	}
+	// A decrypt failure must be distinguishable from a missing key, otherwise the
+	// design's feared fail-open (treating "can't decrypt" as "no such secret") could
+	// silently drop a secret.
+	if errors.Is(err, backend.ErrNotFound) {
+		t.Fatalf("decrypt failure misreported as ErrNotFound: %v", err)
 	}
 }

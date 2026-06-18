@@ -24,6 +24,24 @@ func New(id age.Identity, path string) *Backend {
 	return &Backend{id: id, path: path}
 }
 
+// EncryptVault age-encrypts a name -> value map to w for recipient. It is the inverse
+// of load: the plaintext is the JSON object the Backend decrypts. Phase 6's `av add`
+// uses it to write the vault; tests use it instead of duplicating the encrypt logic.
+func EncryptVault(w io.Writer, recipient age.Recipient, data map[string]string) error {
+	plain, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	aw, err := age.Encrypt(w, recipient)
+	if err != nil {
+		return err
+	}
+	if _, err := aw.Write(plain); err != nil {
+		return err
+	}
+	return aw.Close()
+}
+
 func (b *Backend) load() (map[string]string, error) {
 	f, err := os.Open(b.path)
 	if err != nil {
