@@ -31,12 +31,19 @@ func newResolveServer(t *testing.T) (*Server, string) {
 
 func resolveCall(t *testing.T, path string) ipc.Response {
 	t.Helper()
+	return resolveCallProfile(t, path, "smoke")
+}
+
+// resolveCallProfile drives the resolve method for an arbitrary profile name so a
+// test can exercise the unknown-profile path.
+func resolveCallProfile(t *testing.T, path, profile string) ipc.Response {
+	t.Helper()
 	c, err := transport.Dial(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	params, _ := json.Marshal(ipc.ResolveParams{Profile: "smoke", Manifest: []byte(manifestYAML)})
+	params, _ := json.Marshal(ipc.ResolveParams{Profile: profile, Manifest: []byte(manifestYAML)})
 	if err := ipc.NewEncoder(c).Encode(ipc.Request{ID: 1, Method: "resolve", Params: params}); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +70,22 @@ func TestResolveRPC(t *testing.T) {
 	}
 	if r.Values["GITHUB_TOKEN"] != "ghp_xyz" {
 		t.Fatalf("values = %+v, want GITHUB_TOKEN=ghp_xyz", r.Values)
+	}
+}
+
+// TestResolveRPCUnknownProfile drives resolve for a profile absent from the
+// manifest; the daemon must reject with CodeBadRequest (client fault, not
+// CodeInternal) and never return a result.
+func TestResolveRPCUnknownProfile(t *testing.T) {
+	t.Setenv("AV_TEST_AUTH", "allow")
+	_, path := newResolveServer(t)
+
+	resp := resolveCallProfile(t, path, "nope")
+	if resp.Error == nil || resp.Error.Code != ipc.CodeBadRequest {
+		t.Fatalf("want CodeBadRequest, got error=%+v result=%s", resp.Error, resp.Result)
+	}
+	if resp.Result != nil {
+		t.Fatalf("bad-request resolve must not return a result, got %s", resp.Result)
 	}
 }
 

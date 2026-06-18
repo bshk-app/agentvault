@@ -174,7 +174,10 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		vals, err := s.resolver.Resolve(p.Profile, p.Manifest)
 		if err != nil {
 			code := ipc.CodeInternal
-			if errors.Is(err, ErrLocked) {
+			switch {
+			case errors.Is(err, ErrBadRequest):
+				code = ipc.CodeBadRequest // unknown profile / malformed manifest
+			case errors.Is(err, ErrLocked):
 				code = ipc.CodeLocked
 			}
 			// err.Error() carries names/refs only (resolver never wraps values).

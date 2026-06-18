@@ -1,11 +1,17 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/beshkenadze/agentvault/internal/backend"
 	"github.com/beshkenadze/agentvault/internal/manifest"
 )
+
+// ErrBadRequest marks a client-fault resolve error (unknown profile, malformed
+// manifest) so the daemon maps it to ipc.CodeBadRequest rather than CodeInternal.
+// SECURITY: like every resolver error it carries names/refs only, never a value.
+var ErrBadRequest = errors.New("bad request")
 
 // Resolver turns a (profile, manifest bytes) request into resolved name->value pairs,
 // authorizing each by tier and recording issued values in the session.
@@ -34,11 +40,12 @@ func NewResolver(reg *backend.Registry, auth Authorizer, sess *Session) *Resolve
 func (r *Resolver) Resolve(profile string, manifestBytes []byte) (map[string]string, error) {
 	m, err := manifest.Parse(manifestBytes)
 	if err != nil {
-		return nil, fmt.Errorf("manifest: %w", err)
+		// A malformed manifest is a client fault, not a daemon fault.
+		return nil, fmt.Errorf("%w: manifest: %v", ErrBadRequest, err)
 	}
 	p, ok := m.Profile(profile)
 	if !ok {
-		return nil, fmt.Errorf("profile %q not found", profile)
+		return nil, fmt.Errorf("%w: profile %q not found", ErrBadRequest, profile)
 	}
 	out := make(map[string]string, len(p))
 	for name, e := range p {
