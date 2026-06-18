@@ -65,6 +65,14 @@ type ScrubResult struct {
 	Masked []byte `json:"masked,omitempty"`
 }
 
+// StatusResult is the daemon reply for unlock/status (and the ok reply for lock).
+// SECURITY: it reports ONLY the session's lock state and the remaining unlock
+// window — it has no field for an issued value and so can NEVER carry a secret.
+type StatusResult struct {
+	Locked           bool `json:"locked"`
+	RemainingSeconds int  `json:"remaining_seconds"`
+}
+
 // Encoder writes newline-delimited JSON values. json.Encoder already appends '\n'.
 type Encoder struct{ enc *json.Encoder }
 

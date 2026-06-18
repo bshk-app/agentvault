@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -18,6 +19,11 @@ import (
 	"github.com/beshkenadze/agentvault/internal/redact"
 	"github.com/beshkenadze/agentvault/internal/transport"
 )
+
+// unlockTTL is the default window an "unlock" RPC opens the session for. It is the
+// single source of truth for the unlock duration; the resolver refreshes the
+// deadline per issued value via session.Issue (session.ttl).
+const unlockTTL = 15 * time.Minute
 
 // Server owns the unix-socket listener and serves the JSON-RPC dispatch.
 type Server struct {
@@ -36,7 +42,17 @@ type Server struct {
 	// it. SetResolver captures the resolver's session so scrub redacts the SAME
 	// values resolve issues into (single source of truth).
 	session *Session
+	// presence serves the "unlock" RPC: one Prompt = one native presence check
+	// (Touch ID in production, the env-gated stub in tests). It is injected via
+	// SetPresence and MUST be the SAME presence the resolver holds, so unlock and
+	// dangerous-tier resolve share one auth seam.
+	presence Presence
 }
+
+// SetPresence injects the presence used by the "unlock" RPC. Call it after New and
+// before Serve, with the SAME Presence passed to NewResolver so unlock and
+// dangerous-tier resolve share one auth seam.
+func (s *Server) SetPresence(p Presence) { s.presence = p }
 
 // SetResolver injects the resolver used by the "resolve" method and captures its
 // session for the scrub stream. Call it after New and before Serve. Keeping
@@ -187,6 +203,36 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		}
 		res, _ := json.Marshal(ipc.ResolveResult{Values: vals})
 		return ipc.Response{ID: req.ID, Result: res}
+	case "unlock":
+		// The call that fires Touch ID in production: one presence Prompt opens the
+		// session for unlockTTL. A denied presence maps to CodeDenied; no presence
+		// available (ErrLocked) maps to CodeLocked.
+		if s.presence == nil {
+			return errResp(req.ID, ipc.CodeInternal, "presence not configured")
+		}
+		if s.session == nil {
+			return errResp(req.ID, ipc.CodeInternal, "session not configured")
+		}
+		if err := s.presence.Prompt("Unlock AgentVault"); err != nil {
+			code := ipc.CodeLocked
+			if errors.Is(err, ErrDenied) {
+				code = ipc.CodeDenied
+			}
+			return errResp(req.ID, code, err.Error())
+		}
+		s.session.Unlock(unlockTTL)
+		return statusResponse(req.ID, s.session)
+	case "lock":
+		if s.session == nil {
+			return errResp(req.ID, ipc.CodeInternal, "session not configured")
+		}
+		s.session.Lock()
+		return statusResponse(req.ID, s.session)
+	case "status":
+		if s.session == nil {
+			return errResp(req.ID, ipc.CodeInternal, "session not configured")
+		}
+		return statusResponse(req.ID, s.session)
 	case "scrub":
 		var p ipc.ScrubParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {
@@ -223,6 +269,18 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 			Code: ipc.CodeBadRequest, Message: "unknown method: " + req.Method,
 		}}
 	}
+}
+
+// statusResponse builds the StatusResult reply for unlock/lock/status from the
+// session's lock state. SECURITY: it reads ONLY Status() (locked + remaining) — it
+// never touches issued values, so no secret can reach the reply.
+func statusResponse(id uint64, sess *Session) ipc.Response {
+	locked, remaining := sess.Status()
+	res, _ := json.Marshal(ipc.StatusResult{
+		Locked:           locked,
+		RemainingSeconds: int(remaining.Seconds()),
+	})
+	return ipc.Response{ID: id, Result: res}
 }
 
 // sessionMatcher returns the exact-match matcher over the session's currently-valid

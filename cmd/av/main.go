@@ -37,6 +37,12 @@ func main() {
 		runPing()
 	case "run":
 		runRun(os.Args[2:])
+	case "unlock":
+		runUnlock()
+	case "lock":
+		runLock()
+	case "status":
+		runStatus()
 	case "scrub":
 		runScrub()
 	default:
@@ -46,7 +52,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av scrub  (filters stdin -> stdout)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)")
 }
 
 func runPing() {
@@ -89,6 +95,56 @@ func runRun(args []string) {
 		os.Exit(exitForError(err))
 	}
 	os.Exit(code)
+}
+
+// runUnlock issues the "unlock" RPC — the call that fires Touch ID in production —
+// opening the session for the daemon's unlock TTL. On a locked/denied presence it
+// maps the *ipc.RPCError Code to exit 69/77 via exitForError; on success it prints
+// the remaining window from a follow-up status (secret-free).
+func runUnlock() {
+	cl := dialClient()
+	if err := cl.Unlock(); err != nil {
+		os.Exit(exitForError(err))
+	}
+	_, remaining, err := cl.Status()
+	if err != nil {
+		fmt.Println("unlocked")
+		return
+	}
+	fmt.Printf("unlocked for %dm\n", remaining/60)
+}
+
+// runLock issues the "lock" RPC, re-locking the session and clearing issued values.
+func runLock() {
+	if err := dialClient().Lock(); err != nil {
+		os.Exit(exitForError(err))
+	}
+	fmt.Println("locked")
+}
+
+// runStatus issues the "status" RPC and prints the lock state plus remaining
+// seconds. It NEVER prints a value (status carries none).
+func runStatus() {
+	locked, remaining, err := dialClient().Status()
+	if err != nil {
+		os.Exit(exitForError(err))
+	}
+	if locked {
+		fmt.Println("locked")
+		return
+	}
+	fmt.Printf("unlocked, %ds remaining\n", remaining)
+}
+
+// dialClient resolves the default socket path and returns a client bound to it,
+// exiting with a clear message on a path error (shared by unlock/lock/status).
+func dialClient() *client.Client {
+	path, err := transport.DefaultSocketPath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		os.Exit(exitGeneric)
+	}
+	return client.New(path)
 }
 
 // exitForError maps a client error to an exit code, printing a clear, secret-free

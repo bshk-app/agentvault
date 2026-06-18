@@ -94,6 +94,50 @@ func (c *Client) Resolve(profile string, manifestBytes []byte) (map[string]strin
 	return r.Values, nil
 }
 
+// Unlock issues the "unlock" RPC: in production this is the call that fires Touch
+// ID. On a daemon error it returns resp.Error (a *ipc.RPCError) so the caller can
+// map its Code (CodeLocked/CodeDenied) to an exit code. The StatusResult reply is
+// not needed by the caller (av status reports remaining), so only the error matters.
+func (c *Client) Unlock() error {
+	resp, err := c.call(ipc.Request{ID: 1, Method: "unlock"})
+	if err != nil {
+		return err
+	}
+	if resp.Error != nil {
+		return resp.Error // caller inspects Code (Locked/Denied)
+	}
+	return nil
+}
+
+// Lock issues the "lock" RPC, re-locking the session and clearing issued values.
+func (c *Client) Lock() error {
+	resp, err := c.call(ipc.Request{ID: 1, Method: "lock"})
+	if err != nil {
+		return err
+	}
+	if resp.Error != nil {
+		return resp.Error
+	}
+	return nil
+}
+
+// Status issues the "status" RPC and returns the session lock state and remaining
+// unlock seconds. The reply NEVER carries a value (StatusResult has no value field).
+func (c *Client) Status() (locked bool, remaining int, err error) {
+	resp, err := c.call(ipc.Request{ID: 1, Method: "status"})
+	if err != nil {
+		return false, 0, err
+	}
+	if resp.Error != nil {
+		return false, 0, resp.Error
+	}
+	var r ipc.StatusResult
+	if err := json.Unmarshal(resp.Result, &r); err != nil {
+		return false, 0, err
+	}
+	return r.Locked, r.RemainingSeconds, nil
+}
+
 // Ping issues the "ping" RPC and returns the daemon's reply (expected "pong").
 func (c *Client) Ping() (string, error) {
 	resp, err := c.call(ipc.Request{ID: 1, Method: "ping"})

@@ -19,6 +19,12 @@ func (m mockBE) Resolve(loc string) (backend.Secret, error) {
 }
 func (m mockBE) List(string) ([]backend.Meta, error) { return nil, nil }
 
+// countingPresence is a Presence stub that counts Prompt calls so a test can assert
+// the fresh-per-secret invariant: each dangerous entry must trigger its own Prompt.
+type countingPresence struct{ n int }
+
+func (c *countingPresence) Prompt(string) error { c.n++; return nil }
+
 const manifestYAML = `profiles:
   smoke:
     GITHUB_TOKEN:
@@ -43,11 +49,21 @@ const mixedManifestYAML = `profiles:
       tier: dangerous
 `
 
+const twoDangerousManifestYAML = `profiles:
+  danger2:
+    DEPLOY_KEY:
+      ref: av://mock/DK
+      tier: dangerous
+    PROD_KEY:
+      ref: av://mock/PK
+      tier: dangerous
+`
+
 // newResolverFixture builds a resolver over a mock backend with GH+DK values and a
 // fresh (LOCKED) session, so each test controls unlock state explicitly.
 func newResolverFixture() (*Resolver, *Session) {
 	reg := backend.NewRegistry()
-	reg.Register("mock", mockBE{data: map[string]string{"GH": "ghp_xyz", "DK": "dk_DANGEROUS"}})
+	reg.Register("mock", mockBE{data: map[string]string{"GH": "ghp_xyz", "DK": "dk_DANGEROUS", "PK": "pk_DANGEROUS"}})
 	sess := NewSession(15 * time.Minute)
 	return NewResolver(reg, NewStubPresence(), sess), sess
 }
@@ -152,6 +168,41 @@ func TestResolveMixedNormalCachedDangerousNot(t *testing.T) {
 	}
 	if got := red.Redact("dk_DANGEROUS"); got != "dk_DANGEROUS" {
 		t.Fatalf("SECURITY: dangerous value cached in mixed profile: %q", got)
+	}
+	// The dangerous value must also be absent from the LAYER-2 Matcher (scrub
+	// stream), not just the redactor: an unchanged Mask output == not cached.
+	if got := sess.Matcher().Mask("dk_DANGEROUS"); got != "dk_DANGEROUS" {
+		t.Fatalf("SECURITY: dangerous value cached in mixed-profile matcher: %q", got)
+	}
+}
+
+// TestResolveDangerousFreshPerSecret pins the fresh-per-secret invariant: a profile
+// with TWO dangerous entries must trigger EXACTLY two Prompt calls (one per secret),
+// never a single shared check. Uses a counting presence to assert the count directly.
+func TestResolveDangerousFreshPerSecret(t *testing.T) {
+	reg := backend.NewRegistry()
+	reg.Register("mock", mockBE{data: map[string]string{"DK": "dk_DANGEROUS", "PK": "pk_DANGEROUS"}})
+	cp := &countingPresence{}
+	sess := NewSession(15 * time.Minute)
+	sess.Unlock(15 * time.Minute)
+	rv := NewResolver(reg, cp, sess)
+
+	vals, err := rv.Resolve("danger2", []byte(twoDangerousManifestYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vals["DEPLOY_KEY"] != "dk_DANGEROUS" || vals["PROD_KEY"] != "pk_DANGEROUS" {
+		t.Fatalf("both dangerous values must be returned: %+v", vals)
+	}
+	if cp.n != 2 {
+		t.Fatalf("two dangerous entries must trigger exactly 2 Prompt calls, got %d", cp.n)
+	}
+	// Neither dangerous value may be cached.
+	if got := sess.Matcher().Mask("dk_DANGEROUS"); got != "dk_DANGEROUS" {
+		t.Fatalf("SECURITY: dangerous value cached: %q", got)
+	}
+	if got := sess.Matcher().Mask("pk_DANGEROUS"); got != "pk_DANGEROUS" {
+		t.Fatalf("SECURITY: dangerous value cached: %q", got)
 	}
 }
 
