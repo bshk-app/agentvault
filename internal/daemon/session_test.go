@@ -121,6 +121,39 @@ func TestSessionExpiryClears(t *testing.T) {
 	}
 }
 
+// Defense-in-depth: Issue into a LOCKED session is a no-op. Even if a caller forgets
+// the Locked() guard, a value can never be written into (and thus made maskable by) a
+// closed session.
+func TestSessionIssueIntoLockedIsNoOp(t *testing.T) {
+	s := NewSession(15 * time.Minute) // fresh => locked, never unlocked
+	s.Issue("TOKEN", "ghp_secret")
+	if got := s.Redactor().Redact("ghp_secret"); got != "ghp_secret" {
+		t.Fatalf("value issued into a locked session must not be maskable, got %q", got)
+	}
+	if !s.Locked() {
+		t.Fatal("Issue must not unlock a locked session")
+	}
+}
+
+// Issue into an UNLOCKED-but-EXPIRED session is also a no-op (the expired window is a
+// closed session); it must not refresh the deadline back to life.
+func TestSessionIssueIntoExpiredIsNoOp(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	cur := base
+	s := NewSession(10 * time.Minute)
+	s.now = func() time.Time { return cur }
+	s.Unlock(10 * time.Minute)
+
+	cur = base.Add(11 * time.Minute) // past the unlock deadline => expired/locked
+	s.Issue("TOKEN", "ghp_secret")
+	if !s.Locked() {
+		t.Fatal("Issue into an expired session must not revive it")
+	}
+	if got := s.Redactor().Redact("ghp_secret"); got != "ghp_secret" {
+		t.Fatalf("value issued into an expired session must not be maskable, got %q", got)
+	}
+}
+
 // A value issued in an expired window must NOT resurface after a re-issue: once the
 // TTL lapses, Issue clears the stale set before recording the new value, so the old
 // secret is dropped (not merely hidden). Uses an injected clock — no wall-clock sleep.

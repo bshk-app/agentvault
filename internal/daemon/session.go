@@ -71,15 +71,19 @@ func (s *Session) Status() (locked bool, remaining time.Duration) {
 	return false, s.deadline.Sub(s.now())
 }
 
-// Issue records a name->value pair. If the session has expired, it first clears the
-// old values, then records the new one and refreshes the deadline. Callers must Unlock
-// first (the resolver only Issues after checking Locked()==false); a value issued into
-// a locked/expired session is not honored by Redactor/Matcher.
+// Issue records a name->value pair into an open session, refreshing the deadline.
+//
+// Defense-in-depth: a value is NEVER written into a locked or expired session, even if
+// a caller forgets the Locked() guard. If the session is closed Issue is a no-op (and
+// it clears any stale values from a just-expired window so they cannot resurface). This
+// self-defense backstops the resolver's normal-tier guard and guarantees a locked
+// session can hold no maskable secret.
 func (s *Session) Issue(name, value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.expiredLocked() {
-		s.issued = map[string]string{}
+	if s.lockedLocked() {
+		s.issued = map[string]string{} // drop any stale values; do not record into a closed session
+		return
 	}
 	s.issued[name] = value
 	s.deadline = s.now().Add(s.ttl)

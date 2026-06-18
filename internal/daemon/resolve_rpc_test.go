@@ -13,8 +13,10 @@ import (
 // newResolveServer starts a Server on a short socket path with a mock-backed
 // Resolver injected via SetResolver, serving until the test ends. The mock
 // backend maps "GH" -> "ghp_xyz"; the manifest (manifestYAML, defined in
-// resolver_test.go) resolves GITHUB_TOKEN through it.
-func newResolveServer(t *testing.T) (*Server, string) {
+// resolver_test.go) resolves GITHUB_TOKEN (normal-tier) through it. The session is
+// unlocked unless `locked` is set, since Phase 5 normal-tier resolve requires an open
+// session.
+func newResolveServer(t *testing.T, locked bool) (*Server, string) {
 	t.Helper()
 	path := shortSocketPath(t)
 	srv, err := New(path)
@@ -23,7 +25,11 @@ func newResolveServer(t *testing.T) (*Server, string) {
 	}
 	reg := backend.NewRegistry()
 	reg.Register("mock", mockBE{data: map[string]string{"GH": "ghp_xyz"}})
-	srv.SetResolver(NewResolver(reg, NewStubPresence(), NewSession(15*time.Minute)))
+	sess := NewSession(15 * time.Minute)
+	if !locked {
+		sess.Unlock(15 * time.Minute) // normal-tier resolve needs an open session
+	}
+	srv.SetResolver(NewResolver(reg, NewStubPresence(), sess))
 	go srv.Serve()
 	t.Cleanup(func() { srv.Close() })
 	return srv, path
@@ -54,11 +60,11 @@ func resolveCallProfile(t *testing.T, path, profile string) ipc.Response {
 	return resp
 }
 
-// TestResolveRPC drives the resolve method over the socket with the stub
-// authorizer allowed; the daemon must return the resolved value.
+// TestResolveRPC drives the resolve method over the socket with an unlocked
+// session; the daemon must return the resolved (normal-tier) value.
 func TestResolveRPC(t *testing.T) {
 	t.Setenv("AV_TEST_AUTH", "allow")
-	_, path := newResolveServer(t)
+	_, path := newResolveServer(t, false)
 
 	resp := resolveCall(t, path)
 	if resp.Error != nil {
@@ -78,7 +84,7 @@ func TestResolveRPC(t *testing.T) {
 // CodeInternal) and never return a result.
 func TestResolveRPCUnknownProfile(t *testing.T) {
 	t.Setenv("AV_TEST_AUTH", "allow")
-	_, path := newResolveServer(t)
+	_, path := newResolveServer(t, false)
 
 	resp := resolveCallProfile(t, path, "nope")
 	if resp.Error == nil || resp.Error.Code != ipc.CodeBadRequest {
@@ -89,11 +95,11 @@ func TestResolveRPCUnknownProfile(t *testing.T) {
 	}
 }
 
-// TestResolveRPCLocked drives resolve with the stub authorizer unset; the daemon
-// must reject with CodeLocked (and never leak a value in the error message).
+// TestResolveRPCLocked drives a normal-tier resolve against a LOCKED session; the
+// daemon must reject with CodeLocked (and never leak a value in the error message).
 func TestResolveRPCLocked(t *testing.T) {
-	t.Setenv("AV_TEST_AUTH", "") // not allowed -> ErrLocked
-	_, path := newResolveServer(t)
+	t.Setenv("AV_TEST_AUTH", "allow") // presence would allow; normal-tier still blocked by the locked session
+	_, path := newResolveServer(t, true)
 
 	resp := resolveCall(t, path)
 	if resp.Error == nil || resp.Error.Code != ipc.CodeLocked {

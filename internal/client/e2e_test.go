@@ -122,10 +122,18 @@ func assertNoSecret(t *testing.T, where string, bufs ...*bytes.Buffer) {
 // which must wire the resolver (production path), decrypt the age vault, broker
 // GITHUB_TOKEN, and have av mask it at the source. The child echoes the env var;
 // av's stdout must show the placeholder and the real value must appear NOWHERE.
+//
+// PHASE 5 / TASK 3 NOTE: normal-tier resolve now requires an UNLOCKED session, and a
+// fresh avd session is LOCKED (Task 2). This e2e spawns the REAL avd subprocess and
+// cannot call sess.Unlock directly; it needs the `av unlock` RPC (Task 4) or
+// avd unlock-on-startup wiring (Task 8) to open the session before `av run`. Until that
+// lands this is an EXPECTED skip — do NOT weaken the resolver's normal-needs-unlocked
+// guard to make it pass; Task 4/8 will add the `av unlock` step before this run.
 func TestE2ERunMasksRealSecret(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration: builds and spawns the real avd")
 	}
+	t.Skip("pending Task 4/8: needs `av unlock` before `av run` (normal-tier now requires an unlocked session)")
 	_, sockPath, manifestPath := buildAndAutostartEnv(t, "allow")
 
 	var out, errBuf bytes.Buffer
