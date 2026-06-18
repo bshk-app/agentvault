@@ -13,16 +13,48 @@ import (
 // SECURITY: like every resolver error it carries names/refs only, never a value.
 var ErrBadRequest = errors.New("bad request")
 
+// ErrRateLimited means too many secret issuances happened inside the rate-limit window
+// (mass-enumeration defense). On trip the resolver FORCE-RELOCKS the session and fires
+// the alert hook; this sentinel maps to ipc.CodeRateLimited. SECURITY: it carries no
+// value (and no count/window either — the secret-free reason goes only to the hook).
+var ErrRateLimited = errors.New("rate limited: too many issuances")
+
 // Resolver turns a (profile, manifest bytes) request into resolved name->value pairs,
-// authorizing each via presence and recording issued values in the session.
+// authorizing each via presence and recording issued values in the session. A shared
+// rate limiter bounds total issuances (mass-enumeration defense); on a trip it relocks
+// the session and fires onAlert with a secret-free reason.
 type Resolver struct {
 	reg      *backend.Registry
 	presence Presence
 	sess     *Session
+	limiter  *rateLimiter
+	onAlert  func(reason string)
 }
 
-func NewResolver(reg *backend.Registry, presence Presence, sess *Session) *Resolver {
-	return &Resolver{reg: reg, presence: presence, sess: sess}
+// Option configures a Resolver. The zero-option NewResolver is fully functional: it
+// installs a default limiter (the const budget) and a no-op alert hook, so existing
+// call sites and tests need no change.
+type Option func(*Resolver)
+
+// WithRateLimiter overrides the issuance limiter (tests inject one with a fake clock).
+func WithRateLimiter(rl *rateLimiter) Option { return func(r *Resolver) { r.limiter = rl } }
+
+// WithAlertHook sets the callback fired (with a SECRET-FREE reason) when the limiter
+// trips. Task A3 wires this to the append-only audit log; the default is a no-op.
+func WithAlertHook(fn func(reason string)) Option { return func(r *Resolver) { r.onAlert = fn } }
+
+func NewResolver(reg *backend.Registry, presence Presence, sess *Session, opts ...Option) *Resolver {
+	r := &Resolver{
+		reg:      reg,
+		presence: presence,
+		sess:     sess,
+		limiter:  newRateLimiter(),
+		onAlert:  func(string) {}, // no-op until A3 wires the audit log
+	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // Resolve parses the manifest, selects the profile, applies the per-tier access policy
@@ -75,6 +107,16 @@ func (r *Resolver) Resolve(profile string, manifestBytes []byte) (map[string]str
 			// manifest.validate() rejects unknown tiers, but guard anyway: a bad tier
 			// is a client fault, reported by name only (never a value).
 			return nil, fmt.Errorf("%w: entry %q: unknown tier", ErrBadRequest, name)
+		}
+
+		// Mass-enumeration defense: EVERY issuance (any tier) draws on the shared budget.
+		// On a trip we FORCE-RELOCK (shrinks the blast radius), fire the secret-free alert
+		// (A3 routes it to the audit log), and return nothing — no value is resolved, and
+		// the partial result is discarded so the caller injects nothing.
+		if !r.limiter.allow() {
+			r.sess.Lock()
+			r.onAlert(r.limiter.reason())
+			return nil, ErrRateLimited
 		}
 
 		sec, err := r.reg.Resolve(e.Ref)

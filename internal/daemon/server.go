@@ -197,6 +197,8 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 				code = ipc.CodeLocked
 			case errors.Is(err, ErrDenied):
 				code = ipc.CodeDenied // dangerous-tier presence denied
+			case errors.Is(err, ErrRateLimited):
+				code = ipc.CodeRateLimited // issuance budget tripped — session was relocked
 			}
 			// err.Error() carries names/refs only (resolver never wraps values).
 			return errResp(req.ID, code, err.Error())

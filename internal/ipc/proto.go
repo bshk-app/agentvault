@@ -36,6 +36,7 @@ const (
 	CodeLocked       = 3 // vault locked — agent should ask a human to unlock
 	CodeDenied       = 4 // dangerous-tier denied / no presence
 	CodeUnauthorized = 5 // peer-credential check failed
+	CodeRateLimited  = 6 // issuance rate limit tripped — mass enumeration forced a relock
 )
 
 // ResolveParams is the client request for `resolve`. The thin av sends the raw
