@@ -135,6 +135,16 @@ type SetupResult struct {
 	Created      bool   `json:"created"`
 }
 
+// VersionResult is the daemon reply for `version`: avd's own build version plus the
+// ACTIVE identity-protection tier and whether the Secure Enclave is that protection.
+// SECURITY: it is pure metadata — a version string, a tier name, and a boolean — so it
+// can NEVER carry a secret. Tier is "none" when no local vault is wired.
+type VersionResult struct {
+	Version          string `json:"version"`
+	Tier             string `json:"tier"`
+	EnclaveAvailable bool   `json:"enclave_available"`
+}
+
 // StatusResult is the daemon reply for unlock/status (and the ok reply for lock).
 // SECURITY: it reports ONLY the session's lock state and the remaining unlock
 // window — it has no field for an issued value and so can NEVER carry a secret.

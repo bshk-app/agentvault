@@ -34,6 +34,12 @@ const (
 	exitReadRefused = 80
 )
 
+// version is av's build version, overridden at build time via
+// `-ldflags "-X main.version=<tag>"` (see the Makefile / release Formula). It defaults
+// to "dev" for plain `go build`. `av version` prints it and compares it to avd's so a
+// stale daemon (different version) is loudly flagged.
+var version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -62,6 +68,8 @@ func main() {
 		runInit(os.Args[2:])
 	case "setup":
 		runSetup(os.Args[2:])
+	case "version":
+		runVersion()
 	default:
 		usage()
 		os.Exit(exitBadRequest)
@@ -69,7 +77,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--profile P] NAME  (prints a secret to a TTY only; refuses a pipe)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--plaintext]  (provision the local age vault)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--profile P] NAME  (prints a secret to a TTY only; refuses a pipe)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--plaintext]  (provision the local age vault)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
 }
 
 func runPing() {
@@ -206,6 +214,63 @@ func runStatus() {
 		return
 	}
 	fmt.Printf("unlocked, %ds remaining\n", remaining)
+}
+
+// runVersion prints av's build version and, when the daemon is reachable, avd's version,
+// the active key tier, and the socket path. It NEVER hard-fails on an unreachable daemon:
+// version must work without a running avd (an agent debugging a broken setup), so it prints
+// "avd  (not running)" + the socket path and returns 0. When reachable, an av/avd version
+// mismatch is loudly flagged (suggest a service restart). av stays thin: this is pure ipc —
+// no age/enclave/provision import, only the metadata VersionResult crosses the wire.
+func runVersion() {
+	socket, err := transport.DefaultSocketPath()
+	if err != nil {
+		// Even the socket path is unknown: print just the av line (still no hard-fail).
+		out, _ := formatVersion(version, nil, "")
+		fmt.Print(out)
+		fmt.Fprintln(os.Stderr, "av:", err)
+		return
+	}
+	// A daemon error (not running / unreachable) is NOT fatal: res stays nil and
+	// formatVersion prints the "not running" note. Only the av line is guaranteed.
+	res, err := client.New(socket).Version()
+	if err != nil {
+		out, _ := formatVersion(version, nil, socket)
+		fmt.Print(out)
+		return
+	}
+	out, _ := formatVersion(version, &res, socket)
+	fmt.Print(out)
+}
+
+// formatVersion renders the `av version` block and reports whether av and avd disagree.
+// It is a PURE helper (no IO, no daemon) so the formatting and mismatch logic are unit-
+// testable without a daemon: res==nil means avd is unreachable (print "not running"),
+// otherwise it prints avd's version + tier + Enclave note. A version mismatch appends a
+// LOUD warning suggesting `brew services restart agentvault` and returns mismatch=true.
+// SECURITY: every field here is metadata (versions/tier/socket) — never a secret.
+func formatVersion(avVer string, res *ipc.VersionResult, socket string) (out string, mismatch bool) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "av     %s\n", avVer)
+	if res == nil {
+		fmt.Fprintln(&b, "avd    (not running)")
+		fmt.Fprintf(&b, "socket %s\n", socket)
+		return b.String(), false
+	}
+	fmt.Fprintf(&b, "avd    %s\n", res.Version)
+	mismatch = avVer != res.Version
+	// key line: the active tier, plus a note when the Secure Enclave is NOT the protection
+	// (so the user knows this is the build-from-source keychain/plaintext tier, not Enclave).
+	if res.EnclaveAvailable {
+		fmt.Fprintf(&b, "key    %s\n", res.Tier)
+	} else {
+		fmt.Fprintf(&b, "key    %s  (Enclave unavailable — unsigned build)\n", res.Tier)
+	}
+	fmt.Fprintf(&b, "socket %s\n", socket)
+	if mismatch {
+		fmt.Fprintf(&b, "\nWARNING: av (%s) and avd (%s) versions differ — restart the daemon:\n  brew services restart agentvault\n", avVer, res.Version)
+	}
+	return b.String(), mismatch
 }
 
 // dialClient resolves the default socket path and returns a client bound to it (carrying

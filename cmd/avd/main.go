@@ -27,6 +27,12 @@ import (
 	"github.com/beshkenadze/agentvault/internal/transport"
 )
 
+// version is avd's build version, overridden at build time via
+// `-ldflags "-X main.version=<tag>"` (see the Makefile / release Formula). It defaults
+// to "dev" for plain `go build`. The `version` RPC reports it so `av version` can flag
+// an av/avd mismatch (a stale daemon after an upgrade).
+var version = "dev"
+
 func main() {
 	path, err := transport.DefaultSocketPath()
 	if err != nil {
@@ -36,6 +42,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("avd: listen: %v", err)
 	}
+	srv.SetVersion(version) // surfaced by the `version` RPC (ldflags-injected build tag)
 
 	// daemon.DefaultTTL is the single source of truth for the session window: the
 	// same const the unlock RPC uses (server.go), so the session TTL and the unlock

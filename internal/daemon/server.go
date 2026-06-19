@@ -94,7 +94,16 @@ type Server struct {
 	tierMu       sync.Mutex
 	keyTier      string
 	enclaveAvail bool
+	// version is avd's own build version (ldflags -X main.version), surfaced by the
+	// `version` RPC so `av version` can flag an av/avd mismatch. It is set once via
+	// SetVersion at startup (before Serve), so it needs no mutex. SECURITY: metadata only.
+	version string
 }
+
+// SetVersion records avd's build version for the `version` RPC. cmd/avd calls it in main
+// with the ldflags-injected `version` var. It is set once before Serve, so no lock is
+// needed. SECURITY: it stores a build-version string, never a secret.
+func (s *Server) SetVersion(v string) { s.version = v }
 
 // SetKeyTier records the active identity-protection tier (and whether the Secure Enclave
 // is the active protection) for the future `version` RPC. avd calls it whenever it
@@ -384,6 +393,17 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 	case "ping":
 		r, _ := json.Marshal("pong")
 		return ipc.Response{ID: req.ID, Result: r}
+	case "version":
+		// Pure metadata: avd's build version + the active tier + Enclave availability. No
+		// session, resolver, or provisioner is required (version must work even with no
+		// local vault), and no secret can reach this reply. An unset tier ("" — no local
+		// vault) is reported as "none" so the client never special-cases the empty string.
+		tier, ea := s.KeyTier()
+		if tier == "" {
+			tier = "none"
+		}
+		res, _ := json.Marshal(ipc.VersionResult{Version: s.version, Tier: tier, EnclaveAvailable: ea})
+		return ipc.Response{ID: req.ID, Result: res}
 	case "resolve":
 		var p ipc.ResolveParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {

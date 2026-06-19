@@ -206,6 +206,26 @@ func (c *Client) Setup(p ipc.SetupParams) (ipc.SetupResult, error) {
 	return r, nil
 }
 
+// Version issues the "version" RPC and returns avd's build version plus the active
+// identity-protection tier and Enclave availability. SECURITY: VersionResult is pure
+// metadata (no value field), so this reply can never carry a secret. On a daemon error
+// it returns resp.Error; callers (av version) treat an unreachable daemon as "not running"
+// rather than a hard failure.
+func (c *Client) Version() (ipc.VersionResult, error) {
+	resp, err := c.call(ipc.Request{ID: 1, Method: "version"})
+	if err != nil {
+		return ipc.VersionResult{}, err
+	}
+	if resp.Error != nil {
+		return ipc.VersionResult{}, resp.Error
+	}
+	var r ipc.VersionResult
+	if err := json.Unmarshal(resp.Result, &r); err != nil {
+		return ipc.VersionResult{}, err
+	}
+	return r, nil
+}
+
 // Ping issues the "ping" RPC and returns the daemon's reply (expected "pong").
 func (c *Client) Ping() (string, error) {
 	resp, err := c.call(ipc.Request{ID: 1, Method: "ping"})
