@@ -321,6 +321,12 @@ func (c *Client) Remove(backend, locator string) error {
 // paths — so nothing sensitive crosses the wire here. On a daemon error it returns
 // resp.Error (a *ipc.RPCError) so the caller can map its Code to an exit code.
 func (c *Client) Setup(p ipc.SetupParams) (ipc.SetupResult, error) {
+	// Self-heal a stale daemon BEFORE provisioning: setup writes the identity via the
+	// daemon, so it must run against the upgraded binary (e.g. a keystore fix only lands
+	// in the new avd). ErrDaemonOutdated (agents) propagates so they pause.
+	if err := c.ensureFresh(); err != nil {
+		return ipc.SetupResult{}, err
+	}
 	pb, _ := json.Marshal(p)
 	resp, err := c.call(ipc.Request{ID: 1, Method: "setup", Params: pb})
 	if err != nil {
