@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -285,6 +286,12 @@ func keychainHasIdentity(read func() ([]byte, error)) bool {
 	b, err := read()
 	for i := range b {
 		b[i] = 0 // best-effort scrub the discarded copy; presence is all we keep
+	}
+	// A non-not-found error (locked keychain, ACL change, missing `security`) is treated
+	// as "absent" so discovery fails safe — but LOG it (value-free) so a keychain that
+	// exists-but-is-unreadable is diagnosable instead of a confusing later "run av setup".
+	if err != nil && !errors.Is(err, backend.ErrNotFound) {
+		log.Printf("avd: keychain identity probe failed (treating as absent): %v", err)
 	}
 	return err == nil
 }

@@ -523,11 +523,15 @@ func parseSetupArgs(args []string) (ipc.SetupParams, error) {
 			p.Rotate = true
 		case "--plaintext":
 			p.Plaintext = true
-		case "--keychain":
-			p.Tier = "keychain"
-		case "--enclave":
-			p.Tier = "enclave"
+		case "--keychain", "--enclave":
+			if p.Tier != "" {
+				return p, fmt.Errorf("conflicting tier flags: --%s with %s", p.Tier, a)
+			}
+			p.Tier = a[2:] // "keychain" / "enclave"
 		case "--require-enclave":
+			if p.Tier != "" {
+				return p, fmt.Errorf("conflicting tier flags: --%s with %s", p.Tier, a)
+			}
 			p.Tier = "enclave"
 			p.RequireEnclave = true
 		default:

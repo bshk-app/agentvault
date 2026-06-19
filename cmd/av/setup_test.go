@@ -52,9 +52,15 @@ func TestParseSetupArgsTierFlags(t *testing.T) {
 // TestParseSetupArgsConflict: a tier flag and --plaintext together are a usage error
 // (intent must not be guessed).
 func TestParseSetupArgsConflict(t *testing.T) {
-	if _, err := parseSetupArgs([]string{"--plaintext", "--keychain"}); err == nil ||
-		!strings.Contains(err.Error(), "conflicting") {
-		t.Fatalf("err = %v, want a conflicting-tier-flags error", err)
+	for _, args := range [][]string{
+		{"--plaintext", "--keychain"},
+		{"--keychain", "--enclave"},
+		{"--enclave", "--require-enclave"},
+		{"--require-enclave", "--plaintext"},
+	} {
+		if _, err := parseSetupArgs(args); err == nil || !strings.Contains(err.Error(), "conflicting") {
+			t.Fatalf("%v: err = %v, want a conflicting-tier-flags error", args, err)
+		}
 	}
 }
 
