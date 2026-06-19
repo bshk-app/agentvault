@@ -136,6 +136,32 @@ func (c *Client) Lock() error {
 	return nil
 }
 
+// Shutdown issues the "shutdown" RPC, asking the daemon to exit gracefully so a newly
+// upgraded binary can take over (the self-healing restart). The daemon responds "ok"
+// BEFORE it exits (respond-then-exit), but the connection may still drop as the process
+// dies — so a POST-send read error is treated as SUCCESS: the daemon going away is
+// exactly the goal. Only a dial/send failure (we never reached the daemon) is an error.
+func (c *Client) Shutdown() error {
+	conn, err := c.dial()
+	if err != nil {
+		return err // never reached the daemon
+	}
+	defer conn.Close()
+	if err := ipc.NewEncoder(conn).Encode(ipc.Request{ID: 1, Method: "shutdown"}); err != nil {
+		return err // never delivered the request
+	}
+	// The request is delivered. A decode error now means the daemon exited before/while
+	// replying — which is the desired outcome — so treat any post-send error as success.
+	var resp ipc.Response
+	if err := ipc.NewDecoder(conn).Decode(&resp); err != nil {
+		return nil // connection dropped as the daemon exited == shutdown succeeded
+	}
+	if resp.Error != nil {
+		return resp.Error
+	}
+	return nil
+}
+
 // Status issues the "status" RPC and returns the session lock state and remaining
 // unlock seconds. The reply NEVER carries a value (StatusResult has no value field).
 func (c *Client) Status() (locked bool, remaining int, err error) {

@@ -98,7 +98,19 @@ type Server struct {
 	// `version` RPC so `av version` can flag an av/avd mismatch. It is set once via
 	// SetVersion at startup (before Serve), so it needs no mutex. SECURITY: metadata only.
 	version string
+	// shutdown is the callback the "shutdown" RPC fires to exit the process gracefully
+	// (the self-healing path: `av` shuts an OLD daemon down so launchd/autostart brings
+	// up the NEW binary). It is INJECTED via SetShutdown (nil until wired) so this package
+	// never calls os.Exit itself — cmd/avd supplies the real teardown+exit closure while
+	// tests inject a recording one. SECURITY: it stops the process; no secret crosses it.
+	shutdown func()
 }
+
+// SetShutdown injects the callback the "shutdown" RPC fires to exit the process. cmd/avd
+// wires the SAME teardown the signal path runs, then os.Exit(0). Keeping it injected is
+// what lets the daemon package serve "shutdown" without ever importing os.Exit — tests
+// inject a recording closure that does NOT exit. Call it after New, before Serve.
+func (s *Server) SetShutdown(f func()) { s.shutdown = f }
 
 // SetVersion records avd's build version for the `version` RPC. cmd/avd calls it in main
 // with the ldflags-injected `version` var. It is set once before Serve, so no lock is
@@ -404,6 +416,23 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		}
 		res, _ := json.Marshal(ipc.VersionResult{Version: s.version, Tier: tier, EnclaveAvailable: ea})
 		return ipc.Response{ID: req.ID, Result: res}
+	case "shutdown":
+		// RESPOND-THEN-EXIT (the self-healing restart path): `av` calls this to stop an
+		// OLD daemon so launchd/autostart brings up the NEW binary. We must send "ok"
+		// BEFORE the process dies, so the client knows the shutdown was accepted.
+		//
+		// dispatch only BUILDS the response; handle then Encodes it on this connection.
+		// So we spawn the teardown in a goroutine (`go s.shutdown()`) and RETURN the ok
+		// response: handle's Encode runs in THIS goroutine and completes before/while the
+		// teardown goroutine runs. The teardown closes the listener (srv.Close), which
+		// stops Accept — it never interrupts an in-flight Encode already writing on an
+		// accepted conn — and then exits the process. Peer-cred gating is already enforced
+		// by handle (same-UID only), so no new exposure. SECURITY: stops the process only.
+		ok, _ := json.Marshal("ok")
+		if s.shutdown != nil {
+			go s.shutdown()
+		}
+		return ipc.Response{ID: req.ID, Result: ok}
 	case "resolve":
 		var p ipc.ResolveParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {

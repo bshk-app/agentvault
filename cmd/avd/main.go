@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"filippo.io/age"
@@ -107,17 +108,36 @@ func main() {
 	// SAME session. stop() removes them on shutdown.
 	stopAutoLock := daemon.StartAutoLock(sess)
 
+	// teardown is the SINGLE orderly-shutdown path (SSOT): it removes the auto-lock
+	// observers, closes the listener + releases the single-instance lock, flushes the
+	// audit fd, and removes the socket. BOTH the signal path (SIGINT/SIGTERM) and the
+	// `shutdown` RPC run THIS exact sequence, so they can never drift. sync.Once makes
+	// it safe to call once even if a signal and an RPC race: the second caller is a
+	// no-op (srv.Close already guards its lock, but Once guards the whole sequence).
+	var teardownOnce sync.Once
+	teardown := func() {
+		teardownOnce.Do(func() {
+			stopAutoLock()
+			srv.Close()
+			if c, ok := auditLog.(io.Closer); ok {
+				c.Close() // flush/close the audit fd (NopLogger is not a Closer)
+			}
+			os.Remove(path)
+		})
+	}
+
+	// The `shutdown` RPC drives the SAME teardown, then forces the PROCESS to exit so
+	// launchd/autostart respawns the (newly upgraded) binary — the self-healing restart.
+	// The daemon already returned "ok" to the client before this fires (respond-then-exit
+	// in dispatch), so os.Exit(0) here is the orderly end of a successful shutdown.
+	srv.SetShutdown(func() { teardown(); os.Exit(0) })
+
 	go srv.Serve()
 
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 	<-ch
-	stopAutoLock()
-	srv.Close()
-	if c, ok := auditLog.(io.Closer); ok {
-		c.Close() // flush/close the audit fd (NopLogger is not a Closer)
-	}
-	os.Remove(path)
+	teardown() // signal path: same teardown, then return from main (normal exit)
 }
 
 // selectPresence returns the presence the daemon authorizes with: the env-gated
