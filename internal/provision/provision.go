@@ -1,10 +1,13 @@
 // Package provision creates the local age store for `av setup`: a fresh X25519 identity
-// (Secure-Enclave-wrapped by default) plus an empty age vault. It is linked only by avd,
-// never by the thin av — so the Wrap step is INJECTED (avd passes enclave.Wrap; tests
-// pass a stub), keeping this package free of the cgo enclave import. SECURITY: the
+// plus an empty age vault. The identity is protected by the best available TIER —
+// Secure-Enclave-wrapped (identity.enc) when an Enclave is reachable, otherwise stored in
+// the login keychain, with an explicit plaintext (identity.txt) escape hatch. The package
+// is linked only by avd, never by the thin av — so both the Wrap step and the keychain
+// sink are INJECTED (avd passes enclave.Wrap + keystore.Store; tests pass stubs), keeping
+// this package free of the cgo enclave import and the os/exec keystore. SECURITY: the
 // identity bytes and vault contents are never logged nor returned in an error — only the
-// on-disk paths are. Writes are atomic (temp + fsync + rename) so a crash never leaves a
-// partial identity or vault.
+// on-disk paths (or the keychain locator) are. Writes are atomic (temp + fsync + rename)
+// so a crash never leaves a partial identity or vault.
 package provision
 
 import (
@@ -18,24 +21,51 @@ import (
 	"github.com/beshkenadze/agentvault/internal/config"
 )
 
-// Options configures a provisioning run. A zero Options provisions the default config
-// dir with an Enclave-wrapped identity (and so requires Wrap to be set).
+// Tier names how the generated identity is protected at rest. It is reported back in
+// Result so the caller (and `av version`) can announce the chosen protection.
+type Tier string
+
+const (
+	// TierEnclave wraps the identity in the Secure Enclave (on-disk identity.enc).
+	TierEnclave Tier = "enclave"
+	// TierKeychain stores the identity in the login keychain (no on-disk identity file).
+	TierKeychain Tier = "keychain"
+	// TierPlaintext writes the identity unwrapped to identity.txt (the explicit, opt-in
+	// escape hatch for hosts without an Enclave or keychain).
+	TierPlaintext Tier = "plaintext"
+)
+
+// keychainIdentityPath is the synthetic IdentityPath reported for the keychain tier: the
+// identity has NO on-disk file, so we surface the keychain locator instead of a path.
+const keychainIdentityPath = "keychain:agentvault/identity"
+
+// Options configures a provisioning run. A zero Options provisions the default config dir
+// in the auto tier: it tries the Enclave (if Wrap is set) and otherwise the keychain — it
+// NEVER auto-selects plaintext.
 type Options struct {
 	// Dir is the store directory; empty means config.DefaultConfigDir().
 	Dir string
 	// Rotate forces a fresh identity + empty vault even if a store already exists.
 	Rotate bool
-	// Plaintext writes the identity unwrapped to identity.txt instead of the
-	// Enclave-wrapped identity.enc (the escape hatch for hosts without an Enclave).
-	Plaintext bool
+	// Tier picks the protection tier; "" means auto (Enclave→keychain, never plaintext).
+	Tier Tier
+	// RequireEnclave forbids the Enclave→keychain downgrade: with Tier=enclave a Wrap
+	// failure becomes a HARD error instead of falling back to the keychain.
+	RequireEnclave bool
 	// Wrap seals the identity bytes (enclave.Wrap in production, a stub in tests). It is
-	// REQUIRED unless Plaintext is set; injected so this package needs no enclave import.
+	// injected so this package needs no enclave import; it may be nil (auto then goes
+	// straight to the keychain).
 	Wrap func([]byte) ([]byte, error)
+	// KeychainStore persists the identity bytes in the login keychain (keystore.Store in
+	// production, a recording stub in tests). Required whenever the keychain tier is used.
+	KeychainStore func([]byte) error
 }
 
-// Result reports the on-disk paths and whether files were created this call. SECURITY:
-// it carries paths + a bool only — never the identity bytes or vault contents.
+// Result reports the chosen tier, the on-disk paths (or the keychain locator), and whether
+// files were created this call. SECURITY: it carries the tier + paths + a bool only —
+// never the identity bytes or vault contents.
 type Result struct {
+	Tier         Tier
 	VaultPath    string
 	IdentityPath string
 	Created      bool
@@ -43,11 +73,20 @@ type Result struct {
 
 // Provision creates (or, when idempotent, reports) the local age store. Behavior:
 //   - Resolve the dir (Options.Dir or the config default) and ensure it exists (0700).
-//   - IDEMPOTENT: if both the vault and the identity already exist and !Rotate, return
-//     their paths with Created:false and touch nothing.
-//   - Otherwise generate a fresh X25519 identity, write the identity (wrapped to
-//     identity.enc by default, or plaintext to identity.txt), and write an EMPTY age
-//     vault encrypted to that identity's recipient. Both writes are atomic (0600).
+//   - IDEMPOTENT: if the vault already exists and !Rotate, return Created:false with the
+//     tier INFERRED from what identity exists (identity.enc→enclave, identity.txt→
+//     plaintext, else keychain) and touch nothing.
+//   - Otherwise generate a fresh X25519 identity ONCE, protect it per the resolved tier,
+//     and write an EMPTY age vault encrypted to that identity's recipient. Tier resolution:
+//   - auto (default): Wrap success → enclave (identity.enc); ANY wrap error, or a nil
+//     Wrap → keychain. NEVER auto-plaintext.
+//   - enclave: Wrap failure is a hard error iff RequireEnclave, else it falls back to
+//     the keychain (auto-style).
+//   - keychain: store via KeychainStore; no on-disk identity file.
+//   - plaintext: write identity.txt.
+//
+// The identity is always written/stored BEFORE the vault, so a failure never leaves a
+// vault no reader could open. Both writes are atomic (0600).
 func Provision(o Options) (Result, error) {
 	dir := o.Dir
 	if dir == "" {
@@ -58,18 +97,23 @@ func Provision(o Options) (Result, error) {
 	}
 
 	vaultPath := filepath.Join(dir, "vault.age")
-	idPath := filepath.Join(dir, "identity.enc")
-	if o.Plaintext {
-		idPath = filepath.Join(dir, "identity.txt")
+	encPath := filepath.Join(dir, "identity.enc")
+	txtPath := filepath.Join(dir, "identity.txt")
+
+	// Idempotency: a provisioned store (the vault is present) is left untouched unless the
+	// caller asks to Rotate. The keychain tier has NO on-disk identity, so the vault is the
+	// SSOT for "already provisioned"; the tier is inferred from whichever identity file
+	// exists (identity.enc→enclave, identity.txt→plaintext, else keychain).
+	if !o.Rotate && fileExists(vaultPath) {
+		return Result{
+			Tier:         inferTier(encPath, txtPath),
+			VaultPath:    vaultPath,
+			IdentityPath: inferIdentityPath(encPath, txtPath),
+			Created:      false,
+		}, nil
 	}
 
-	// Idempotency: a fully provisioned store (both files present) is left untouched
-	// unless the caller asks to Rotate. We re-provision when EITHER file is missing, so a
-	// half-written store (only one file) is completed rather than reported as done.
-	if !o.Rotate && fileExists(vaultPath) && fileExists(idPath) {
-		return Result{VaultPath: vaultPath, IdentityPath: idPath, Created: false}, nil
-	}
-
+	// Generate the identity ONCE; every tier protects these same bytes.
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
 		return Result{}, fmt.Errorf("generate identity: %w", err)
@@ -77,24 +121,11 @@ func Provision(o Options) (Result, error) {
 	// age.ParseIdentities (the reader on unlock/decrypt) expects newline-terminated lines.
 	idBytes := []byte(id.String() + "\n")
 
-	// Write the identity FIRST. If we wrote the vault first and then failed on the
-	// identity, the store would have a vault no reader could ever open.
-	if o.Plaintext {
-		if err := writeAtomic(idPath, idBytes); err != nil {
-			// SECURITY: the path-only error never includes idBytes.
-			return Result{}, fmt.Errorf("write identity: %w", err)
-		}
-	} else {
-		if o.Wrap == nil {
-			return Result{}, fmt.Errorf("wrap required for Enclave identity (use Plaintext for an unwrapped store)")
-		}
-		blob, err := o.Wrap(idBytes)
-		if err != nil {
-			return Result{}, fmt.Errorf("wrap identity: %w", err)
-		}
-		if err := writeAtomic(idPath, blob); err != nil {
-			return Result{}, fmt.Errorf("write identity: %w", err)
-		}
+	// Protect the identity FIRST (write/store it). If we wrote the vault first and then
+	// failed on the identity, the store would have a vault no reader could ever open.
+	tier, idPath, err := protectIdentity(o, idBytes, encPath, txtPath)
+	if err != nil {
+		return Result{}, err
 	}
 
 	// Write an EMPTY vault encrypted to the new identity's recipient. We reuse
@@ -104,7 +135,106 @@ func Provision(o Options) (Result, error) {
 		return Result{}, err
 	}
 
-	return Result{VaultPath: vaultPath, IdentityPath: idPath, Created: true}, nil
+	return Result{Tier: tier, VaultPath: vaultPath, IdentityPath: idPath, Created: true}, nil
+}
+
+// protectIdentity applies the resolved tier to idBytes and returns the chosen tier plus
+// the IdentityPath to report (an on-disk path, or the keychain locator). SECURITY: idBytes
+// is passed through to the injected sinks only; it is NEVER logged or embedded in an error.
+func protectIdentity(o Options, idBytes []byte, encPath, txtPath string) (Tier, string, error) {
+	switch o.Tier {
+	case TierPlaintext:
+		if err := writeAtomic(txtPath, idBytes); err != nil {
+			// SECURITY: the path-only error never includes idBytes.
+			return "", "", fmt.Errorf("write identity: %w", err)
+		}
+		return TierPlaintext, txtPath, nil
+
+	case TierKeychain:
+		if err := storeKeychain(o, idBytes); err != nil {
+			return "", "", err
+		}
+		return TierKeychain, keychainIdentityPath, nil
+
+	case TierEnclave:
+		// Explicit enclave: try Wrap; on failure, RequireEnclave is what forbids the
+		// downgrade — without it we fall back to the keychain (auto-style).
+		if blob, werr := tryWrap(o.Wrap, idBytes); werr == nil {
+			if err := writeAtomic(encPath, blob); err != nil {
+				return "", "", fmt.Errorf("write identity: %w", err)
+			}
+			return TierEnclave, encPath, nil
+		} else if o.RequireEnclave {
+			return "", "", fmt.Errorf("wrap identity: %w", werr)
+		}
+		// Downgrade to keychain.
+		if err := storeKeychain(o, idBytes); err != nil {
+			return "", "", err
+		}
+		return TierKeychain, keychainIdentityPath, nil
+
+	default: // auto ("")
+		// Enclave when Wrap is set AND succeeds; ANY wrap error (or a nil Wrap) → keychain.
+		// NEVER auto-plaintext.
+		if o.Wrap != nil {
+			if blob, werr := o.Wrap(idBytes); werr == nil {
+				if err := writeAtomic(encPath, blob); err != nil {
+					return "", "", fmt.Errorf("write identity: %w", err)
+				}
+				return TierEnclave, encPath, nil
+			}
+		}
+		if err := storeKeychain(o, idBytes); err != nil {
+			return "", "", err
+		}
+		return TierKeychain, keychainIdentityPath, nil
+	}
+}
+
+// tryWrap requires a non-nil Wrap for the explicit enclave tier and returns its result.
+func tryWrap(wrap func([]byte) ([]byte, error), idBytes []byte) ([]byte, error) {
+	if wrap == nil {
+		return nil, fmt.Errorf("wrap required for the enclave tier")
+	}
+	return wrap(idBytes)
+}
+
+// storeKeychain requires a non-nil KeychainStore and persists the identity through it.
+// SECURITY: a store failure is wrapped value-free; idBytes never reaches the error.
+func storeKeychain(o Options, idBytes []byte) error {
+	if o.KeychainStore == nil {
+		return fmt.Errorf("keychain store required for the keychain tier")
+	}
+	if err := o.KeychainStore(idBytes); err != nil {
+		return fmt.Errorf("store identity in keychain: %w", err)
+	}
+	return nil
+}
+
+// inferTier reports the tier of an already-provisioned store from which identity file (if
+// any) is on disk: identity.enc→enclave, identity.txt→plaintext, else keychain.
+func inferTier(encPath, txtPath string) Tier {
+	switch {
+	case fileExists(encPath):
+		return TierEnclave
+	case fileExists(txtPath):
+		return TierPlaintext
+	default:
+		return TierKeychain
+	}
+}
+
+// inferIdentityPath returns the IdentityPath to report for an already-provisioned store:
+// the on-disk identity file when one exists, else the keychain locator.
+func inferIdentityPath(encPath, txtPath string) string {
+	switch {
+	case fileExists(encPath):
+		return encPath
+	case fileExists(txtPath):
+		return txtPath
+	default:
+		return keychainIdentityPath
+	}
 }
 
 // fileExists reports whether path is an existing (regular or any) file. A stat error

@@ -317,10 +317,18 @@ func mapEnclaveErr(err error) error {
 // no secret material is logged, returned, or embedded in an error.
 func makeProvisioner(reg *backend.Registry, sess *daemon.Session, wrap, unwrap func([]byte) ([]byte, error)) func(ipc.SetupParams) (ipc.SetupResult, error) {
 	return func(p ipc.SetupParams) (ipc.SetupResult, error) {
+		// Tier selection: keep today's behavior — plaintext when the client asks for it,
+		// otherwise the enclave path with the injected Wrap. Task 3 wires KeychainStore and
+		// the keychain unwrapper; until then KeychainStore stays nil (so the keychain tier
+		// is unreachable here) and we never request it.
+		tier := provision.Tier("")
+		if p.Plaintext {
+			tier = provision.TierPlaintext
+		}
 		r, err := provision.Provision(provision.Options{
-			Rotate:    p.Rotate,
-			Plaintext: p.Plaintext,
-			Wrap:      wrap, // Dir defaults to config.DefaultConfigDir() inside Provision
+			Rotate: p.Rotate,
+			Tier:   tier,
+			Wrap:   wrap, // Dir defaults to config.DefaultConfigDir() inside Provision
 		})
 		if err != nil {
 			return ipc.SetupResult{}, err
@@ -331,7 +339,7 @@ func makeProvisioner(reg *backend.Registry, sess *daemon.Session, wrap, unwrap f
 		// or by a prior setup — so re-registering it would be redundant churn and the
 		// "file backend identity: ..." log line would be misleading. Skip it.
 		if r.Created {
-			if p.Plaintext {
+			if r.Tier == provision.TierPlaintext {
 				if werr := wirePlaintextBackend(reg, r.IdentityPath, r.VaultPath); werr != nil {
 					return ipc.SetupResult{}, werr
 				}
