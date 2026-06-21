@@ -55,65 +55,71 @@ func Run(cl *Client, opts RunOptions, stdout, stderr io.Writer) (exitCode int, e
 	}
 	// nil/empty vals means the profile issued no secrets — mask nothing, not an error.
 
-	secrets := make([]redact.Secret, 0, len(vals))
-	for name, val := range vals {
-		secrets = append(secrets, redact.Secret{Name: name, Value: val})
-	}
-	m := redact.NewMatcher(secrets)
+	return runChild(vals, nil, true /* mask */, opts.Command, stdout, stderr)
+}
 
-	cmd := exec.Command(opts.Command[0], opts.Command[1:]...)
-	cmd.Env = childEnv(vals)
+// runChild execs command with the parent environment overlaid by literals then by the
+// resolved vals (vals win), and — when mask is true — masks the resolved values in the
+// child's stdout/stderr at the source (layer 1). Shared by av run (literals nil, always
+// masked) and av env (literals from .env, mask = !--no-mask). Returns the child's exit
+// code; (-1, err) on a start/flush failure.
+func runChild(vals, literals map[string]string, mask bool, command []string, stdout, stderr io.Writer) (exitCode int, err error) {
+	cmd := exec.Command(command[0], command[1:]...)
+	cmd.Env = childEnv(vals, literals)
 	cmd.Stdin = os.Stdin
 
-	// Layer 1: wrap the child's stdio at the source. A StreamRedactor is an
-	// io.Writer that masks as it forwards; its retained tail must be flushed AFTER
-	// the child exits (Close below).
-	outR := redact.NewStreamRedactor(m, stdout)
-	errR := redact.NewStreamRedactor(m, stderr)
-	cmd.Stdout = outR
-	cmd.Stderr = errR
+	var outR, errR *redact.StreamRedactor
+	if mask {
+		secrets := make([]redact.Secret, 0, len(vals))
+		for name, val := range vals {
+			secrets = append(secrets, redact.Secret{Name: name, Value: val})
+		}
+		m := redact.NewMatcher(secrets)
+		outR = redact.NewStreamRedactor(m, stdout)
+		errR = redact.NewStreamRedactor(m, stderr)
+		cmd.Stdout, cmd.Stderr = outR, errR
+		defer func() {
+			for i := range secrets {
+				secrets[i] = redact.Secret{}
+			}
+		}()
+	} else {
+		cmd.Stdout, cmd.Stderr = stdout, stderr
+	}
 
 	runErr := cmd.Run()
 
-	// Flush the overlap tails AFTER the child has finished and all its output has
-	// been written through the redactors. Closing earlier would truncate output.
-	flushErr := outR.Close()
-	if cerr := errR.Close(); flushErr == nil {
-		flushErr = cerr
+	var flushErr error
+	if mask {
+		flushErr = outR.Close()
+		if cerr := errR.Close(); flushErr == nil {
+			flushErr = cerr
+		}
 	}
-
-	// Best-effort zeroize: drop references so the values are eligible for GC. Go strings
-	// are immutable, so this cannot scrub the backing bytes; av stays thin (no memguard),
-	// and the env-injected child inherently needs cleartext, so this is the most av can
-	// do here. The canonical at-rest protection lives in avd's session (mlock + zeroize
-	// of issued values); see internal/daemon/secmem.go. Clearing maps/secrets drops the
-	// last av-side references promptly.
 	clear(vals)
-	for i := range secrets {
-		secrets[i] = redact.Secret{}
-	}
 
 	if runErr != nil {
 		var ee *exec.ExitError
 		if errors.As(runErr, &ee) {
-			// Clean non-zero exit: surface the child's code, not an error.
 			return ee.ExitCode(), nil
 		}
-		// Could not start the child (e.g. command not found) — a real error.
-		return -1, fmt.Errorf("av run: %w", runErr)
+		return -1, fmt.Errorf("av: run %q: %w", command[0], runErr)
 	}
 	if flushErr != nil {
-		return -1, fmt.Errorf("av run: flush masked output: %w", flushErr)
+		return -1, fmt.Errorf("av: flush masked output: %w", flushErr)
 	}
 	return 0, nil
 }
 
-// childEnv returns the parent environment with each resolved NAME=value appended
-// (later entries win in exec, so resolved values override any inherited same-name).
-func childEnv(vals map[string]string) []string {
+// childEnv returns the parent environment overlaid with literals, then vals (later
+// entries win at exec, so a resolved value overrides any inherited/literal same-name).
+func childEnv(vals, literals map[string]string) []string {
 	env := os.Environ()
-	for name, val := range vals {
-		env = append(env, name+"="+val)
+	for k, v := range literals {
+		env = append(env, k+"="+v)
+	}
+	for k, v := range vals {
+		env = append(env, k+"="+v)
 	}
 	return env
 }
