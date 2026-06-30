@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist for the app-like bundle that hosts `avd` so it can carry an embedded
+  provisioning profile (required to create Secure Enclave keys — see
+  packaging/avd.entitlements.template). scripts/release-signed.sh fills __VERSION__.
+
+  CFBundleIdentifier MUST match the suffix of com.apple.application-identifier in the
+  entitlements. LSUIElement=true: the daemon presents the Touch ID prompt but carries
+  no Dock icon / menu bar UI. The bundle is launched by the per-user LaunchAgent at
+  Contents/MacOS/avd.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>app.bshk.agentvault</string>
+    <key>CFBundleName</key>
+    <string>AgentVault</string>
+    <key>CFBundleExecutable</key>
+    <string>avd</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>

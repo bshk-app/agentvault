@@ -30,7 +30,7 @@ typedef struct {
 // kAVEnclaveKeyTag is the stable application tag the Enclave key is persisted
 // under. MUST match keyTag in enclave_darwin.go so create and load address the
 // same key across boots.
-static NSString *const kAVEnclaveKeyTag = @"com.beshkenadze.agentvault.age-wrap";
+static NSString *const kAVEnclaveKeyTag = @"app.bshk.agentvault.age-wrap";
 
 // The ECIES algorithm used for both wrap (public-key encrypt) and unwrap
 // (private-key decrypt). X9.63 KDF + SHA-256 + AES-GCM is the standard hybrid

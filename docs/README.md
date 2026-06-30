@@ -14,6 +14,7 @@ These guides go deeper, task by task.
 | [Agent integration](agent-integration.md) | wire AgentVault into Claude Code (or any agent) so its output is redacted automatically |
 | [Security model](security-model.md) | understand what AgentVault does and does not protect against, and how the key is protected at rest |
 | [Troubleshooting](troubleshooting.md) | fix a stuck Touch ID prompt, a locked vault, a version skew, or a confusing exit code |
+| [Signing & notarization](signing-and-notarization.md) | *(maintainers)* cut the signed, notarized release that unlocks the Secure Enclave tier |
 
 ## Reference
 

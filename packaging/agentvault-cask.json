@@ -1,0 +1,16 @@
+{
+  "token": "agentvault",
+  "name": "AgentVault",
+  "desc": "Agent-agnostic secret broker for macOS",
+  "homepage": "https://github.com/bshk-app/agentvault",
+  "appBundle": "AgentVault.app",
+  "dependsOnMacOS": true,
+  "binary": ["av"],
+  "zapTrash": [
+    "~/.config/agentvault",
+    "~/Library/Caches/agentvault",
+    "~/Library/Logs/agentvault",
+    "~/Library/LaunchAgents/app.bshk.agentvault.avd.plist"
+  ],
+  "caveats": "AgentVault runs a per-user background daemon (avd) that holds your secrets and is gated by Touch ID. Start it (and have it relaunch at login) with:\n\n  brew services start agentvault\n\nThen provision the vault once: `av setup`. Unlocking presents a Touch ID prompt, so avd must run in your GUI session — `brew services` handles that for you."
+}

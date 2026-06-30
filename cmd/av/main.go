@@ -50,6 +50,8 @@ func main() {
 		runPing()
 	case "run":
 		runRun(os.Args[2:])
+	case "env":
+		runEnv(os.Args[2:])
 	case "read":
 		runRead(os.Args[2:])
 	case "unlock":
@@ -77,7 +79,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--profile P] NAME  (prints a secret to a TTY only; refuses a pipe)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]  (provision the local age vault; auto-picks the best tier)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av env [--env-file PATH] [--profile P] [--no-mask] -- cmd args...  (run cmd with .env av:// refs resolved + injected)\n  av read [--backend file | --profile P] NAME  (TTY only; default reads av://file/NAME, no manifest)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]  (provision the local age vault; auto-picks the best tier)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
 }
 
 func runPing() {
@@ -122,6 +124,80 @@ func runRun(args []string) {
 	os.Exit(code)
 }
 
+// envOptions are the parsed flags of `av env`.
+type envOptions struct {
+	envFile string // --env-file (default ".env")
+	profile string // --profile (merged from agentvault.yaml; "" => default "smoke" in EnvRun)
+	noMask  bool   // --no-mask
+}
+
+// runEnv parses `av env [--env-file PATH] [--profile P] [--no-mask] -- cmd...` and runs
+// cmd with .env (and/or agentvault.yaml) av:// references resolved into its environment.
+func runEnv(args []string) {
+	o := envOptions{envFile: ".env"}
+	cmdArgs, err := parseEnvArgs(args, &o)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		usage()
+		os.Exit(exitBadRequest)
+	}
+	path, err := transport.DefaultSocketPath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		os.Exit(exitGeneric)
+	}
+	code, err := client.EnvRun(client.New(path).WithNoPrompt(noPrompt()).WithVersion(version), client.EnvOptions{
+		EnvFilePath: o.envFile,
+		Profile:     o.profile,
+		NoMask:      o.noMask,
+		Command:     cmdArgs,
+	}, os.Stdout, os.Stderr)
+	if err != nil {
+		os.Exit(exitForError(err))
+	}
+	os.Exit(code)
+}
+
+// parseEnvArgs extracts --env-file / --profile / --no-mask and the child argv (after
+// `--`). The child command is required.
+func parseEnvArgs(args []string, o *envOptions) ([]string, error) {
+	if o.envFile == "" {
+		o.envFile = ".env"
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			cmd := args[i+1:]
+			if len(cmd) == 0 {
+				return nil, fmt.Errorf("no command given (use: av env [flags] -- cmd args...)")
+			}
+			return cmd, nil
+		case a == "--env-file":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--env-file needs a value")
+			}
+			o.envFile = args[i+1]
+			i++
+		case len(a) > 11 && a[:11] == "--env-file=":
+			o.envFile = a[11:]
+		case a == "--profile":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--profile needs a value")
+			}
+			o.profile = args[i+1]
+			i++
+		case len(a) > 10 && a[:10] == "--profile=":
+			o.profile = a[10:]
+		case a == "--no-mask":
+			o.noMask = true
+		default:
+			return nil, fmt.Errorf("unexpected argument %q (flags must precede --)", a)
+		}
+	}
+	return nil, fmt.Errorf("no command given (use: av env [flags] -- cmd args...)")
+}
+
 // runRead parses `av read [--profile P] NAME`, resolves the single logical name
 // through the daemon, and prints its value — BUT ONLY to a terminal. If stdout is
 // not a TTY (a pipe/file), client.Read refuses (writes nothing of the value) and
@@ -131,8 +207,9 @@ func runRun(args []string) {
 // os.ModeCharDevice (no new dependency); client.Read takes it as a parameter so
 // the refusal branch is unit-testable without a terminal.
 func runRead(args []string) {
-	profile := "smoke" // default profile; override with --profile
-	name, err := parseReadArgs(args, &profile)
+	profile := ""     // empty => DIRECT mode; --profile switches to MANIFEST mode
+	backend := "file" // DIRECT mode default: the writable age vault (symmetric with av add)
+	name, err := parseReadArgs(args, &profile, &backend)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "av:", err)
 		usage()
@@ -145,10 +222,16 @@ func runRead(args []string) {
 		os.Exit(exitGeneric)
 	}
 
-	code, err := client.Read(client.New(path).WithNoPrompt(noPrompt()).WithVersion(version), client.ReadOptions{
-		Profile: profile,
-		Name:    name,
-	}, os.Stdout, stdoutIsTTY())
+	// --profile selects MANIFEST mode; otherwise DIRECT mode reads av://<backend>/NAME
+	// straight from the writable backend (no agentvault.yaml needed).
+	opts := client.ReadOptions{Name: name}
+	if profile != "" {
+		opts.Profile = profile
+	} else {
+		opts.Backend = backend
+	}
+
+	code, err := client.Read(client.New(path).WithNoPrompt(noPrompt()).WithVersion(version), opts, os.Stdout, stdoutIsTTY())
 	if err != nil {
 		// A *ipc.RPCError (resolve: locked/denied/bad-request) maps via exitForError.
 		// Otherwise client.Read already chose the exit code (refused=80, missing
@@ -411,11 +494,15 @@ func parseInitArgs(args []string) (initOptions, error) {
 	return opt, nil
 }
 
-// parseReadArgs extracts --profile and the single positional NAME from
-// `av read [--profile P] NAME`. Exactly one positional name is required.
-func parseReadArgs(args []string, profile *string) (string, error) {
+// parseReadArgs extracts the single positional NAME and the addressing mode for
+// `av read`. Default (no flags) is DIRECT mode against the writable backend
+// (--backend file) — symmetric with av add/av rm, so a value stored via `av add NAME`
+// reads back with `av read NAME` and NO agentvault.yaml. --profile P switches to
+// MANIFEST mode (resolve NAME through agentvault.yaml). --backend and --profile are
+// mutually exclusive (two different addressing modes). Exactly one NAME is required.
+func parseReadArgs(args []string, profile *string, backend *string) (string, error) {
 	var name string
-	have := false
+	have, sawProfile, sawBackend := false, false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -424,9 +511,21 @@ func parseReadArgs(args []string, profile *string) (string, error) {
 				return "", fmt.Errorf("--profile needs a value")
 			}
 			*profile = args[i+1]
+			sawProfile = true
 			i++
 		case len(a) > 10 && a[:10] == "--profile=":
 			*profile = a[10:]
+			sawProfile = true
+		case a == "--backend":
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--backend needs a value")
+			}
+			*backend = args[i+1]
+			sawBackend = true
+			i++
+		case len(a) > 10 && a[:10] == "--backend=":
+			*backend = a[10:]
+			sawBackend = true
 		default:
 			if have {
 				return "", fmt.Errorf("av read takes exactly one NAME")
@@ -435,8 +534,11 @@ func parseReadArgs(args []string, profile *string) (string, error) {
 			have = true
 		}
 	}
+	if sawProfile && sawBackend {
+		return "", fmt.Errorf("use either --backend (direct) or --profile (manifest), not both")
+	}
 	if !have {
-		return "", fmt.Errorf("av read needs a NAME (use: av read [--profile P] NAME)")
+		return "", fmt.Errorf("av read needs a NAME (use: av read [--backend file] NAME)")
 	}
 	return name, nil
 }

@@ -1,0 +1,101 @@
+name: release
+
+# Public AgentVault release on a GitHub-hosted macOS runner: CGO Go build -> wrap `avd` in
+# AgentVault.app -> Developer-ID sign + notarize + staple (via `zamokctl package`) -> tarball
+# -> publish the Homebrew cask to bshk-app/homebrew-tap + upload the tarball to this release.
+#
+# Unlike the self-hosted Gitea twin (.gitea/workflows/release.yml), a GitHub-hosted runner has
+# NO Developer ID cert in its keychain, so we import it from the bshk-app org secrets and derive
+# the signing SHA-1 + Team ID from it. Secrets/inputs are passed into run: via env: (never
+# interpolated into the shell) to avoid command injection.
+#
+# Reused bshk-app org secrets (already set for Murmur): DEVELOPER_ID_P12(+_PASSWORD),
+# NOTARY_KEY_P8, NOTARY_KEY_ID, NOTARY_ISSUER, TAP_GITHUB_TOKEN.
+# AgentVault-specific repo/org secret to add: AGENTVAULT_PROVISION_PROFILE (base64 of the
+# Developer ID provisioning profile that authorizes avd's Secure-Enclave App ID).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag, e.g. v0.1.0"
+        required: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # go.mod pins a newer Go than the runner ships — install it explicitly (+ module cache)
+      # so the CGO build is deterministic and fast, not relying on on-demand toolchain download.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Import Developer ID certificate
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.DEVELOPER_ID_P12 }}
+          p12-password:    ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+
+      - name: Install zamokctl
+        run: brew install bshk-app/homebrew-tap/zamokctl
+
+      - name: Resolve version + signing identity + team id
+        id: vars
+        env:
+          VERSION_IN: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          V="$VERSION_IN"; [ -n "$V" ] || V="$GITHUB_REF_NAME"   # tag push -> v0.1.0
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          SHA1="$(security find-identity -v -p codesigning | awk '/Developer ID Application/{print $2; exit}')"
+          [ -n "$SHA1" ] || { echo "no Developer ID Application identity in keychain" >&2; exit 1; }
+          echo "sha1=$SHA1" >> "$GITHUB_OUTPUT"
+          # Team ID is the (TEAMID) suffix of the identity name — release-signed.sh substitutes it
+          # into the entitlements template (com.apple.application-identifier = TEAMID.<bundle-id>).
+          NAME="$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application/{print $2; exit}')"
+          TEAM_ID="$(printf '%s' "$NAME" | sed -n 's/.*(\([A-Z0-9]\{10\}\))$/\1/p')"
+          [ -n "$TEAM_ID" ] || { echo "could not parse Team ID from identity: $NAME" >&2; exit 1; }
+          echo "team_id=$TEAM_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Build -> sign -> notarize -> staple -> tarball
+        env:
+          AGENTVAULT_PROVISION_PROFILE: ${{ secrets.AGENTVAULT_PROVISION_PROFILE }}
+          NOTARY_KEY_P8:      ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID:      ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER:      ${{ secrets.NOTARY_ISSUER }}
+          SIGN_IDENTITY_SHA1: ${{ steps.vars.outputs.sha1 }}
+          TEAM_ID:            ${{ steps.vars.outputs.team_id }}
+          VERSION:            ${{ steps.vars.outputs.version }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$AGENTVAULT_PROVISION_PROFILE" | base64 --decode > packaging/agentvault.provisionprofile
+          P8="$RUNNER_TEMP/notary.p8"; printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$P8"
+          NOTARY_API_KEY_P8="$P8" ./scripts/release-signed.sh "$VERSION"
+
+      # Renders Casks/agentvault.rb from manifest.json + the metadata, pushes it to the tap, and
+      # (--store git-release) uploads the tarball to this repo's release for that version.
+      - name: Publish cask -> tap
+        env:
+          GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          zamokctl cask \
+            --manifest dist/manifest.json \
+            --metadata packaging/agentvault-cask.json \
+            --store git-release --asset-repo "$GITHUB_REPOSITORY" \
+            --tap bshk-app/homebrew-tap
+
+      - name: Cleanup signing material
+        if: always()
+        run: rm -f packaging/agentvault.provisionprofile "$RUNNER_TEMP/notary.p8"

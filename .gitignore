@@ -1,5 +1,8 @@
 /bin/
+/dist/
 *.test
 *.out
 .DS_Store
 .claude/
+# account-specific signing material — never commit
+*.provisionprofile

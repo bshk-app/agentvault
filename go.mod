@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	filippo.io/age v1.3.1
+	github.com/joho/godotenv v1.5.1
 	github.com/zricethezav/gitleaks/v8 v8.30.1
 	golang.org/x/sys v0.46.0
 	golang.org/x/term v0.37.0

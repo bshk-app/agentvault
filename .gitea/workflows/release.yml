@@ -1,0 +1,87 @@
+name: release
+
+# Build → Developer-ID sign → notarize → staple → tarball → publish the Homebrew cask,
+# on a SELF-HOSTED macOS runner (alex-mac). Signing must run on a Mac whose login
+# keychain holds the Developer ID Application cert — a self-hosted runner is the natural
+# fit (no cert-import step needed, unlike a GitHub-hosted runner).
+#
+# Trigger: a v* tag (or manual). See docs/gitea-cicd.md for one-time setup + secrets.
+# Adjust `runs-on` to YOUR runner's label, and the env values below to your Gitea.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag, e.g. v0.1.0"
+        required: true
+  push:
+    tags: ["v*"]
+
+env:
+  GITEA_URL: https://git.YOUR-HOST            # your local Gitea base URL
+  TAP_REPO: YOUR_OWNER/homebrew-tap           # tap repo that receives Casks/agentvault.rb
+  NOTARY_PROFILE: AgentVault
+
+jobs:
+  release:
+    runs-on: macos-latest      # ← set to your alex-mac runner label
+    steps:
+      - name: Resolve version
+        id: ver
+        run: |
+          V="${{ github.event.inputs.version }}"
+          [ -n "$V" ] || V="${GITHUB_REF_NAME}"   # tag-push: refs/tags/v0.1.0 -> v0.1.0
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch sources (curl tarball — no node/git, runner-agnostic)
+        run: |
+          curl -fsSL -H "Authorization: token ${{ github.token }}" \
+            "${GITEA_URL}/api/v1/repos/${{ github.repository }}/archive/${{ github.sha }}.tar.gz" \
+            | tar xz --strip-components=1
+
+      - name: Ensure zamokctl is installed
+        run: |
+          command -v zamokctl >/dev/null || {
+            brew tap zamok/zamok "${GITEA_URL}/zamok/homebrew-zamok.git"
+            brew install zamok/zamok/zamokctl
+          }
+          zamokctl --version
+
+      # Account-specific signing material. The Developer ID cert is expected to already
+      # live in the runner's login keychain; only the provisioning profile + notary creds
+      # come from secrets so the job is reproducible.
+      - name: Materialize the Developer ID provisioning profile
+        run: echo "${{ secrets.AV_PROVISION_PROFILE }}" | base64 --decode > packaging/agentvault.provisionprofile
+
+      # Skip this step if your runner already has the NOTARY_PROFILE stored
+      # (xcrun notarytool store-credentials AgentVault …) — then drop the AV_NOTARY_* secrets too.
+      - name: Store notarytool credentials (App Store Connect API key)
+        run: |
+          echo "${{ secrets.AV_NOTARY_KEY_P8 }}" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          xcrun notarytool store-credentials "$NOTARY_PROFILE" \
+            --key "$RUNNER_TEMP/AuthKey.p8" \
+            --key-id "${{ secrets.AV_NOTARY_KEY_ID }}" \
+            --issuer "${{ secrets.AV_NOTARY_ISSUER_ID }}"
+
+      - name: Build → sign → notarize → staple → tarball → manifest.json
+        env:
+          TEAM_ID: ${{ secrets.AV_TEAM_ID }}
+          DEV_ID: ${{ secrets.AV_DEV_ID }}   # "Developer ID Application: NAME (TEAMID)"
+        run: ./scripts/release-signed.sh "${{ steps.ver.outputs.version }}"
+
+      # zamokctl renders Casks/agentvault.rb from manifest.json + the metadata and pushes
+      # it to the tap; --store git-release also uploads the tarball to this repo's release.
+      - name: Publish the Homebrew cask
+        env:
+          GITEA_TOKEN: ${{ secrets.AV_TAP_TOKEN }}   # write access to agent-vault releases + the tap
+        run: |
+          zamokctl cask \
+            --manifest dist/manifest.json \
+            --metadata packaging/agentvault-cask.json \
+            --store git-release --asset-repo "${{ github.repository }}" \
+            --tap-host gitea --gitea-url "${GITEA_URL}" --tap "${TAP_REPO}"
+
+      # Self-hosted runners persist the workspace — wipe account-specific material.
+      - name: Cleanup signing material
+        if: always()
+        run: rm -f packaging/agentvault.provisionprofile "$RUNNER_TEMP/AuthKey.p8"

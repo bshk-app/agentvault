@@ -13,7 +13,7 @@ set -uo pipefail
 REPO="${REPO:-/Volumes/DATA/agent-vault}"
 AV="$(command -v av || true)"
 AVD="$(command -v avd || true)"
-[ -n "$AV" ] && [ -n "$AVD" ] || { echo "av/avd not on PATH (brew install beshkenadze/tap/agentvault)"; exit 1; }
+[ -n "$AV" ] && [ -n "$AVD" ] || { echo "av/avd not on PATH (brew install bshk-app/homebrew-tap/agentvault)"; exit 1; }
 
 PASS=0; FAIL=0
 ok(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS+1)); }

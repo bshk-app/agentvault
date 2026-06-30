@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the SIGNED `avd` bundle (the only binary that touches the Secure
+  Enclave). scripts/release-signed.sh substitutes __TEAM_ID__ with your 10-char Apple
+  Team ID and passes the rendered file to `codesign --entitlements`.
+
+  WHY: SecKeyCreateRandomKey + kSecAttrTokenIDSecureEnclave (internal/enclave/
+  enclave_darwin.m) fails with errSecMissingEntitlement (-34018) unless the binary
+  carries com.apple.application-identifier AND that entitlement is authorized by an
+  embedded Developer ID provisioning profile. The keychain-access-group is the default
+  group the Enclave key item lands in (it equals the application-identifier).
+
+  `av` is NOT signed with these — it never calls SecKey, so it ships as a bare binary.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.application-identifier</key>
+    <string>__TEAM_ID__.app.bshk.agentvault</string>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>__TEAM_ID__.app.bshk.agentvault</string>
+    </array>
+</dict>
+</plist>

@@ -15,7 +15,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.beshkenadze.agentvault.avd</string>
+    <string>app.bshk.agentvault.avd</string>
 
     <key>ProgramArguments</key>
     <array>

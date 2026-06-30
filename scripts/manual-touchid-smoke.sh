@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-LABEL="com.beshkenadze.agentvault.avd"
+LABEL="app.bshk.agentvault.avd"
 PLIST_SRC="$REPO_ROOT/packaging/${LABEL}.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 INSTALL_DIR="$HOME/bin"

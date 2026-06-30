@@ -20,7 +20,7 @@
 set -uo pipefail
 
 AV="$(command -v av || true)"; AVD="$(command -v avd || true)"
-[ -n "$AV" ] && [ -n "$AVD" ] || { echo "av/avd not on PATH (brew install beshkenadze/tap/agentvault)"; exit 1; }
+[ -n "$AV" ] && [ -n "$AVD" ] || { echo "av/avd not on PATH (brew install bshk-app/homebrew-tap/agentvault)"; exit 1; }
 [ "$(uname -s)" = "Darwin" ] || { echo "real backends (Keychain/Touch ID) are macOS-only"; exit 1; }
 
 PASS=0; FAIL=0

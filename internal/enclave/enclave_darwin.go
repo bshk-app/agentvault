@@ -83,7 +83,7 @@ var errUnavailable = errors.New("secure enclave unavailable on this build")
 // fixed tag means EnsureKey is idempotent: the first call creates the key, every
 // later call (this boot or a future one) loads the same key so a blob wrapped once
 // stays unwrappable. Mirrored verbatim in enclave_darwin.m.
-const keyTag = "com.beshkenadze.agentvault.age-wrap"
+const keyTag = "app.bshk.agentvault.age-wrap"
 
 // EnsureKey creates-or-loads the Secure Enclave P-256 wrapping key. It is safe to
 // call repeatedly (idempotent). It performs NO Touch ID — only key material

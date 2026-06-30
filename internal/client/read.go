@@ -4,14 +4,26 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/beshkenadze/agentvault/internal/manifest"
 )
 
-// ReadOptions configures a single `av read` invocation.
+// ReadOptions configures a single `av read` invocation. It addresses the secret in
+// one of two modes: DIRECT (Backend set) resolves av://<Backend>/<Name> straight
+// through the resolver with no on-disk manifest — symmetric with av add/av rm, so a
+// value added with `av add NAME` reads back with `av read NAME`; MANIFEST (Profile
+// set) resolves Name through agentvault.yaml. Exactly one mode is used (Backend wins
+// if both are set; cmd/av keeps them mutually exclusive).
 type ReadOptions struct {
-	Profile      string // profile to resolve from the manifest
-	ManifestPath string // path to agentvault.yaml (default "agentvault.yaml" in cwd)
+	Profile      string // MANIFEST mode: profile to resolve from the manifest
+	ManifestPath string // MANIFEST mode: path to agentvault.yaml (default "agentvault.yaml" in cwd)
+	Backend      string // DIRECT mode: backend id to read av://<Backend>/<Name> from (no manifest)
 	Name         string // logical name of the single secret to read
 }
+
+// syntheticReadProfile is the in-memory profile name used for a DIRECT read; it never
+// touches disk and is invisible to the user.
+const syntheticReadProfile = "_read"
 
 // exitReadRefused is the distinct exit code returned when av read is asked to
 // print a secret to a non-terminal (a pipe/file). It is intentionally outside
@@ -32,19 +44,33 @@ const exitReadRefused = 80
 // resolves (Resolve already enforces unlock/dangerous/audit). On a daemon error
 // (locked/denied) Read returns the *ipc.RPCError so cmd/av maps its Code.
 func Read(cl *Client, opts ReadOptions, out io.Writer, outIsTTY bool) (exitCode int, err error) {
-	manifestPath := opts.ManifestPath
-	if manifestPath == "" {
-		manifestPath = defaultManifestPath
-	}
-	manifestBytes, err := os.ReadFile(manifestPath)
-	if err != nil {
-		// No secret in this path — only the path/OS error.
-		return -1, fmt.Errorf("av read: read manifest %s: %w", manifestPath, err)
+	var manifestBytes []byte
+	profile := opts.Profile
+	if opts.Backend != "" {
+		// DIRECT mode: synthesize a one-entry manifest av://<backend>/<name> and
+		// resolve it through the same daemon path as a real profile — no
+		// agentvault.yaml required. This makes read symmetric with av add/av rm.
+		profile = syntheticReadProfile
+		ref := "av://" + opts.Backend + "/" + opts.Name
+		manifestBytes, err = manifest.Synthetic(profile, opts.Name, ref, manifest.TierNormal)
+		if err != nil {
+			return -1, fmt.Errorf("av read: build request: %w", err)
+		}
+	} else {
+		manifestPath := opts.ManifestPath
+		if manifestPath == "" {
+			manifestPath = defaultManifestPath
+		}
+		manifestBytes, err = os.ReadFile(manifestPath)
+		if err != nil {
+			// No secret in this path — only the path/OS error.
+			return -1, fmt.Errorf("av read: read manifest %s: %w", manifestPath, err)
+		}
 	}
 
 	// Resolve over the socket. avd parses the manifest and resolves the backends;
 	// av stays thin. On a daemon error this is a *ipc.RPCError (caller inspects Code).
-	vals, err := cl.Resolve(opts.Profile, manifestBytes)
+	vals, err := cl.Resolve(profile, manifestBytes)
 	if err != nil {
 		return -1, err
 	}
@@ -52,7 +78,7 @@ func Read(cl *Client, opts ReadOptions, out io.Writer, outIsTTY bool) (exitCode 
 	val, ok := vals[opts.Name]
 	if !ok {
 		// Absent name yields NO value (not even a hint of one).
-		return exitBadRequestRead, fmt.Errorf("no such secret %q in profile %q", opts.Name, opts.Profile)
+		return exitBadRequestRead, fmt.Errorf("no such secret %q", opts.Name)
 	}
 
 	// SECURITY GUARD: refuse to emit a secret to a non-terminal. Nothing of the

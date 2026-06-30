@@ -65,6 +65,46 @@ func TestReadPrintsOnTTY(t *testing.T) {
 	}
 }
 
+// TestReadDirectBackendNoManifest is the symmetry fix: a value added with
+// `av add NAME` (the writable file backend) must be readable with `av read NAME`
+// WITHOUT an agentvault.yaml. Direct mode addresses av://<backend>/<NAME> straight
+// through the resolver — no manifest on disk (note: no writeManifest call here).
+func TestReadDirectBackendNoManifest(t *testing.T) {
+	t.Setenv("AV_TEST_AUTH", "allow")
+	cl := newRunServer(t)
+
+	var out bytes.Buffer
+	code, err := Read(cl, ReadOptions{Backend: "mock", Name: "S"}, &out, true /* outIsTTY */)
+	if err != nil {
+		t.Fatalf("direct read error: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if out.String() != "topsecret\n" {
+		t.Fatalf("out = %q, want %q", out.String(), "topsecret\n")
+	}
+}
+
+// TestReadDirectRefusesNonTTY: the security guard still holds in direct mode —
+// reading to a pipe writes nothing of the value and returns the refusal code.
+func TestReadDirectRefusesNonTTY(t *testing.T) {
+	t.Setenv("AV_TEST_AUTH", "allow")
+	cl := newRunServer(t)
+
+	var out bytes.Buffer
+	code, err := Read(cl, ReadOptions{Backend: "mock", Name: "S"}, &out, false /* pipe */)
+	if code != exitReadRefused {
+		t.Fatalf("exit code = %d, want %d (read-refused)", code, exitReadRefused)
+	}
+	if err == nil {
+		t.Fatal("refusal must return a (secret-free) error message")
+	}
+	if out.Len() != 0 || strings.Contains(out.String(), "topsecret") {
+		t.Fatalf("SECURITY: refusal must write NOTHING to out; got %q", out.String())
+	}
+}
+
 // TestReadMissingName errors (and prints no value) when the logical name is not
 // in the resolved profile — even on a TTY, an absent name yields NO value.
 func TestReadMissingName(t *testing.T) {

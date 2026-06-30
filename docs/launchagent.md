@@ -39,22 +39,22 @@ Therefore `avd` must run as a **per-user LaunchAgent**, never as a system
      -e "s|__AGE_IDENTITY_FILE__|$HOME/.config/agentvault/identity.txt|" \
      -e "s|__AGE_VAULT_FILE__|$HOME/.config/agentvault/vault.age|" \
      -e "s|__LOG_DIR__|$HOME/Library/Logs/agentvault|" \
-     packaging/com.beshkenadze.agentvault.avd.plist \
-     > ~/Library/LaunchAgents/com.beshkenadze.agentvault.avd.plist
+     packaging/app.bshk.agentvault.avd.plist \
+     > ~/Library/LaunchAgents/app.bshk.agentvault.avd.plist
    ```
 
 3. Load it into the **GUI session** (this is what makes Touch ID presentable):
 
    ```sh
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.beshkenadze.agentvault.avd.plist
-   launchctl print gui/$(id -u)/com.beshkenadze.agentvault.avd | head   # should show state = running
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/app.bshk.agentvault.avd.plist
+   launchctl print gui/$(id -u)/app.bshk.agentvault.avd | head   # should show state = running
    ```
 
    To reload after changes:
 
    ```sh
-   launchctl bootout gui/$(id -u)/com.beshkenadze.agentvault.avd 2>/dev/null
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.beshkenadze.agentvault.avd.plist
+   launchctl bootout gui/$(id -u)/app.bshk.agentvault.avd 2>/dev/null
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/app.bshk.agentvault.avd.plist
    ```
 
 ## Manual verification (Touch ID — cannot be automated)
