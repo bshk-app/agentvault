@@ -153,6 +153,21 @@ type StatusResult struct {
 	RemainingSeconds int  `json:"remaining_seconds"`
 }
 
+// ServiceParams is the client request for the "service" RPC: manage avd's login-item
+// registration. Action is "enable" | "disable" | "status". SECURITY: it carries NO
+// secret — only a verb — so nothing sensitive crosses the wire.
+type ServiceParams struct {
+	Action string `json:"action"`
+}
+
+// ServiceResult is the daemon reply for "service": the active backend
+// ("smappservice" | "launchagent" | "") and the resulting registration State
+// ("enabled" | "disabled" | "requires-approval"). Pure metadata — never a secret.
+type ServiceResult struct {
+	Backend string `json:"backend"`
+	State   string `json:"state"`
+}
+
 // Encoder writes newline-delimited JSON values. json.Encoder already appends '\n'.
 type Encoder struct{ enc *json.Encoder }
 

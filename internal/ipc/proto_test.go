@@ -80,3 +80,18 @@ func TestDecodeOverLimitFailsLoud(t *testing.T) {
 		t.Fatalf("over-limit decode leaked a partial object: %+v", got)
 	}
 }
+
+func TestServiceParamsResultRoundTrip(t *testing.T) {
+	p := ServiceParams{Action: "enable"}
+	b, _ := json.Marshal(p)
+	var got ServiceParams
+	if err := json.Unmarshal(b, &got); err != nil || got.Action != "enable" {
+		t.Fatalf("ServiceParams round-trip: got %+v err %v", got, err)
+	}
+	r := ServiceResult{Backend: "smappservice", State: "requires-approval"}
+	b, _ = json.Marshal(r)
+	var gr ServiceResult
+	if err := json.Unmarshal(b, &gr); err != nil || gr != r {
+		t.Fatalf("ServiceResult round-trip: got %+v err %v", gr, err)
+	}
+}

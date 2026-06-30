@@ -1,6 +1,7 @@
 // Package daemon implements the avd serve loop. The dispatch handles "ping",
-// "resolve" (broker secrets into the session), and the streaming "scrub"/
-// "scrub_flush" (layer-2 redaction); later phases add lock/etc. on the same dispatch.
+// "resolve" (broker secrets into the session), the streaming "scrub"/"scrub_flush"
+// (layer-2 redaction), and "service" (login-item register/unregister/status); later
+// phases add lock/etc. on the same dispatch.
 package daemon
 
 import (
@@ -19,6 +20,7 @@ import (
 	"github.com/beshkenadze/agentvault/internal/audit"
 	"github.com/beshkenadze/agentvault/internal/backend"
 	"github.com/beshkenadze/agentvault/internal/ipc"
+	"github.com/beshkenadze/agentvault/internal/loginitem"
 	"github.com/beshkenadze/agentvault/internal/redact"
 	"github.com/beshkenadze/agentvault/internal/transport"
 )
@@ -79,6 +81,11 @@ type Server struct {
 	// links both, supplies the real closure (provision.Provision with enclave.Wrap).
 	// SECURITY: it takes/returns only ipc.SetupParams/SetupResult — no secret crosses it.
 	provision func(ipc.SetupParams) (ipc.SetupResult, error)
+	// loginitem serves the "service" RPC: register/unregister avd as a login item.
+	// INJECTED via SetLoginItem (avd wires loginitem.New() after New); nil in tests
+	// that don't exercise it. Registration MUST run in avd because SMAppService
+	// resolves the plist relative to avd's own bundle (av is not in it).
+	loginitem loginitem.Manager
 	// setupMu serializes the whole setup case: each connection runs in its own goroutine,
 	// so two concurrent `av setup` RPCs would otherwise race the provision write AND the
 	// live re-wire it triggers (registry Register + session unwrapper swap). Holding it
@@ -142,6 +149,9 @@ func (s *Server) KeyTier() (tier string, enclaveAvailable bool) {
 func (s *Server) SetProvisioner(f func(ipc.SetupParams) (ipc.SetupResult, error)) {
 	s.provision = f
 }
+
+// SetLoginItem injects the login-item Manager that serves the "service" RPC.
+func (s *Server) SetLoginItem(m loginitem.Manager) { s.loginitem = m }
 
 // SetPresence injects the presence used by the "unlock" RPC. Call it after New and
 // before Serve, with the SAME Presence passed to NewResolver so unlock and
@@ -573,6 +583,37 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 			return errResp(req.ID, ipc.CodeInternal, err.Error())
 		}
 		out, _ := json.Marshal(res)
+		return ipc.Response{ID: req.ID, Result: out}
+	case "service":
+		var p ipc.ServiceParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
+		}
+		if s.loginitem == nil {
+			return errResp(req.ID, ipc.CodeInternal, "login item not configured")
+		}
+		// enable/disable mutate the user-owned login item; status only reads. A bad
+		// verb is a client bug (CodeBadRequest). SECURITY: ServiceResult is metadata
+		// only — backend name + State string — so no secret can reach this reply.
+		switch p.Action {
+		case "enable":
+			if err := s.loginitem.Enable(); err != nil {
+				return errResp(req.ID, ipc.CodeInternal, err.Error())
+			}
+		case "disable":
+			if err := s.loginitem.Disable(); err != nil {
+				return errResp(req.ID, ipc.CodeInternal, err.Error())
+			}
+		case "status":
+			// read-only
+		default:
+			return errResp(req.ID, ipc.CodeBadRequest, "unknown service action: "+p.Action)
+		}
+		st, err := s.loginitem.Status()
+		if err != nil {
+			return errResp(req.ID, ipc.CodeInternal, err.Error())
+		}
+		out, _ := json.Marshal(ipc.ServiceResult{Backend: string(s.loginitem.Backend()), State: st.String()})
 		return ipc.Response{ID: req.ID, Result: out}
 	case "status":
 		if s.session == nil {
