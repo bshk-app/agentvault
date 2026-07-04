@@ -6,5 +6,6 @@
 .claude/
 claudedocs/
 .worktrees/
+.agents/
 # account-specific signing material — never commit
 *.provisionprofile
