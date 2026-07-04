@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 
 	"golang.org/x/term"
@@ -81,7 +82,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av env [--env-file PATH] [--profile P] [--no-mask] -- cmd args...  (run cmd with .env av:// refs resolved + injected)\n  av read [--backend file | --profile P] NAME  (TTY only; default reads av://file/NAME, no manifest)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]  (provision the local age vault; auto-picks the best tier)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av service on|off|status  (start avd at login; manage in System Settings → Login Items)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av env [--env-file PATH] [--profile P] [--no-mask] -- cmd args...  (run cmd with .env av:// refs resolved + injected)\n  av read [--backend file | --profile P] NAME  (TTY only; default reads av://file/NAME, no manifest)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]  (provision the local age vault; auto-picks the best tier)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av service on|off|status  (start avd at login via the native per-user service manager)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
 }
 
 func runPing() {
@@ -262,7 +263,7 @@ func stdoutIsTTY() bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-// runUnlock issues the "unlock" RPC — the call that fires Touch ID in production —
+// runUnlock issues the "unlock" RPC — the call that fires native presence in production —
 // opening the session for the daemon's unlock TTL. On a locked/denied presence it
 // maps the *ipc.RPCError Code to exit 69/77 via exitForError; on success it prints
 // the remaining window from a follow-up status (secret-free).
@@ -344,12 +345,20 @@ func formatVersion(avVer string, res *ipc.VersionResult, socket string) (out str
 	}
 	fmt.Fprintf(&b, "avd    %s\n", res.Version)
 	mismatch = avVer != res.Version
-	// key line: the active tier, plus a note when the Secure Enclave is NOT the protection
-	// (so the user knows this is the build-from-source keychain/plaintext tier, not Enclave).
-	if res.EnclaveAvailable {
+	// key line: the active tier, with a note only when it's genuinely informative.
+	// EnclaveAvailable is a BUILD capability (can this binary reach the Secure Enclave),
+	// independent of the active tier — so we blame an "unsigned build" ONLY when the build
+	// truly can't do Enclave, and hint "run `av setup`" when a capable build just has no
+	// vault yet. (A signed, unprovisioned box must NOT read as "unsigned".)
+	switch {
+	case res.Tier == "enclave":
+		fmt.Fprintf(&b, "key    enclave\n")
+	case !res.EnclaveAvailable:
+		fmt.Fprintf(&b, "key    %s  (Secure Enclave unavailable — unsigned build)\n", res.Tier)
+	case res.Tier == "none":
+		fmt.Fprintf(&b, "key    none  (no vault yet — run `av setup`)\n")
+	default:
 		fmt.Fprintf(&b, "key    %s\n", res.Tier)
-	} else {
-		fmt.Fprintf(&b, "key    %s  (Enclave unavailable — unsigned build)\n", res.Tier)
 	}
 	fmt.Fprintf(&b, "socket %s\n", socket)
 	if mismatch {
@@ -373,7 +382,7 @@ func dialClient() *client.Client {
 
 // noPrompt reports the AV_NO_PROMPT agent opt-out: any non-empty value is truthy (agents
 // set AV_NO_PROMPT=1 — see the generated adapter). When set, a locked daemon session is
-// NOT opened with Touch ID on demand; resolve/add/rm return CodeLocked (exit 69) so the
+// NOT opened with native presence on demand; resolve/add/rm return CodeLocked (exit 69) so the
 // agent pauses for a human to unlock instead of blocking on a biometric prompt.
 func noPrompt() bool { return os.Getenv("AV_NO_PROMPT") != "" }
 
@@ -634,7 +643,7 @@ func enableLoginItemBestEffort() {
 	case "requires-approval":
 		fmt.Println("avd added to Login Items — approve it in System Settings → General → Login Items.")
 	default:
-		fmt.Println("avd will start at login. Manage it in System Settings → General → Login Items, or `av service off`.")
+		fmt.Printf("avd will start at login via %s. Manage it with `av service off`.\n", serviceManagerName())
 	}
 }
 
@@ -711,6 +720,19 @@ func runService(args []string) {
 	fmt.Printf("login item (%s): %s\n", res.Backend, res.State)
 	if res.State == "requires-approval" {
 		fmt.Println("approve it in System Settings → General → Login Items (Allow in the Background).")
+	}
+}
+
+func serviceManagerName() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "Login Items"
+	case "linux":
+		return "systemd --user"
+	case "windows":
+		return "Task Scheduler"
+	default:
+		return "the native service manager"
 	}
 }
 

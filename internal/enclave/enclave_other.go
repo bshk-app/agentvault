@@ -17,6 +17,9 @@ var errUnavailable = errors.New("secure enclave unavailable on this build")
 // EnsureKey is unavailable on this build.
 func EnsureKey() error { return errUnavailable }
 
+// Available is false on this build — the Secure Enclave needs darwin+cgo.
+func Available() bool { return false }
+
 // Wrap is unavailable on this build. It never returns plaintext.
 func Wrap(_ []byte) ([]byte, error) { return nil, errUnavailable }
 

@@ -76,3 +76,23 @@ func TestFormatVersionEnclaveNote(t *testing.T) {
 		t.Fatalf("enclave tier must not carry the unavailable note:\n%s", out)
 	}
 }
+
+// TestFormatVersionNoVaultYet: a signed, Enclave-capable build with no vault yet must NOT
+// be mislabeled "unsigned" (the confusing bug) — it hints to run setup. An Enclave-INcapable
+// build with no vault still gets the honest "unsigned build" note.
+func TestFormatVersionNoVaultYet(t *testing.T) {
+	signed := &ipc.VersionResult{Version: "v1", Tier: "none", EnclaveAvailable: true}
+	out, _ := formatVersion("v1", signed, "/s.sock")
+	if strings.Contains(strings.ToLower(out), "unsigned") {
+		t.Fatalf("a signed, unprovisioned build must not read as 'unsigned':\n%s", out)
+	}
+	if !strings.Contains(out, "no vault yet") {
+		t.Fatalf("a capable build with no vault should hint to run `av setup`:\n%s", out)
+	}
+
+	unsigned := &ipc.VersionResult{Version: "v1", Tier: "none", EnclaveAvailable: false}
+	out, _ = formatVersion("v1", unsigned, "/s.sock")
+	if !strings.Contains(strings.ToLower(out), "unsigned") {
+		t.Fatalf("an Enclave-incapable build should still be flagged 'unsigned':\n%s", out)
+	}
+}

@@ -98,6 +98,16 @@ func EnsureKey() error {
 	return nil
 }
 
+// Available reports whether THIS build can actually use the Secure Enclave: the
+// enclave cgo is compiled in AND the binary is signed with the app-identifier
+// entitlement authorized by a provisioning profile (an ad-hoc / unsigned build fails
+// key creation with errSecMissingEntitlement). It reuses EnsureKey, which performs NO
+// Touch ID — only key material management — so it is a cheap capability probe (side
+// effect: it creates-or-loads the idempotent wrapping key). cmd/avd calls it once at
+// startup so `av version` reports an honest tier note instead of always blaming an
+// "unsigned build".
+func Available() bool { return EnsureKey() == nil }
+
 // Wrap ECIES-encrypts plaintext (the "AGE-SECRET-KEY-..." bytes) to the Enclave
 // key's public key and returns the ciphertext blob to persist on disk. It calls
 // EnsureKey first so a fresh setup just works. NO Touch ID: encryption uses only

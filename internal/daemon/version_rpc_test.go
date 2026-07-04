@@ -23,11 +23,13 @@ func versionServer(t *testing.T) (*Server, string) {
 }
 
 // TestVersionRPCReportsWiredFields: the "version" case returns avd's wired version plus
-// the active tier and Enclave-availability recorded via SetKeyTier — no secret involved.
+// the active tier (SetKeyTier) and build Enclave-capability (SetEnclaveAvailable), which
+// are independent — a keychain-tier vault on an Enclave-capable build. No secret involved.
 func TestVersionRPCReportsWiredFields(t *testing.T) {
 	srv, path := versionServer(t)
 	srv.SetVersion("v9.9.9")
-	srv.SetKeyTier("keychain", false)
+	srv.SetKeyTier("keychain")
+	srv.SetEnclaveAvailable(true) // capable build, but the active tier is keychain
 
 	resp := rpc(t, path, "version")
 	if resp.Error != nil {
@@ -43,8 +45,8 @@ func TestVersionRPCReportsWiredFields(t *testing.T) {
 	if res.Tier != "keychain" {
 		t.Fatalf("Tier = %q, want keychain", res.Tier)
 	}
-	if res.EnclaveAvailable {
-		t.Fatalf("EnclaveAvailable = true, want false")
+	if !res.EnclaveAvailable {
+		t.Fatalf("EnclaveAvailable = false, want true (capability is independent of tier)")
 	}
 }
 

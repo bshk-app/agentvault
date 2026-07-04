@@ -114,11 +114,11 @@ type ScrubResult struct {
 // exists.
 //
 // Tier picks the protection tier explicitly ("enclave"/"keychain"/"plaintext"); ""
-// means auto (Enclave→keychain, never plaintext). RequireEnclave forbids the
-// Enclave→keychain downgrade so a Wrap failure becomes a hard error instead of a
-// silent keychain fallback. Plaintext is the LEGACY flag kept for back-compat: when
-// Tier is unset it is mapped to Tier=plaintext (the explicit escape hatch for hosts
-// without a Secure Enclave / cgo). New callers should set Tier directly.
+// means auto (Enclave where available → OS keychain/keyring, never plaintext).
+// RequireEnclave forbids the Enclave→keychain downgrade so a Wrap failure becomes a hard
+// error instead of a silent keychain fallback. Plaintext is the LEGACY flag kept for
+// back-compat: when Tier is unset it is mapped to Tier=plaintext. New callers should set
+// Tier directly.
 type SetupParams struct {
 	Rotate         bool   `json:"rotate,omitempty"`
 	Plaintext      bool   `json:"plaintext,omitempty"`
@@ -135,8 +135,9 @@ type SetupResult struct {
 	Created      bool   `json:"created"`
 }
 
-// VersionResult is the daemon reply for `version`: avd's own build version plus the
-// ACTIVE identity-protection tier and whether the Secure Enclave is that protection.
+// VersionResult is the daemon reply for `version`: avd's own build version, the ACTIVE
+// identity-protection tier, and whether THIS BUILD can use the Secure Enclave (a
+// capability — signed with the entitlement + cgo — independent of the active tier).
 // SECURITY: it is pure metadata — a version string, a tier name, and a boolean — so it
 // can NEVER carry a secret. Tier is "none" when no local vault is wired.
 type VersionResult struct {

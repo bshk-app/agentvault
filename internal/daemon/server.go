@@ -15,8 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/beshkenadze/agentvault/internal/audit"
 	"github.com/beshkenadze/agentvault/internal/backend"
 	"github.com/beshkenadze/agentvault/internal/ipc"
@@ -43,7 +41,7 @@ const connIdleTimeout = 5 * time.Minute
 // Server owns the unix-socket listener and serves the JSON-RPC dispatch.
 type Server struct {
 	ln       net.Listener
-	lock     *os.File // exclusive flock held for the daemon's lifetime (I-1)
+	lock     instanceLock // exclusive process-wide lock held for the daemon's lifetime (I-1)
 	lockPath string
 	// checkPeer gates every connection on a peer-credential check. It defaults to
 	// transport.CheckPeer in New; it is an injectable seam so the reject-and-close
@@ -93,11 +91,12 @@ type Server struct {
 	setupMu sync.Mutex
 	// keyTier records the ACTIVE identity-protection tier the file backend's unwrapper
 	// represents ("enclave"/"keychain"/"plaintext", or ""/"none" with no local vault).
-	// enclaveAvail reports whether the Secure Enclave is the active protection. Both are
-	// set via SetKeyTier whenever avd wires/re-wires a tier, so the future `version` RPC
-	// can announce the active tier. SECURITY: metadata only — never a secret. tierMu
-	// guards the pair because SetKeyTier (setup goroutine) and a future version RPC
-	// (another goroutine) can touch it concurrently.
+	// enclaveAvail reports whether THIS BUILD can use the Secure Enclave (a capability,
+	// set once at startup via SetEnclaveAvailable) — decoupled from the active tier so
+	// `version` can tell "no Enclave-capable build" from "capable, but no enclave vault
+	// yet". keyTier is set via SetKeyTier when avd wires/re-wires a tier. SECURITY:
+	// metadata only — never a secret. tierMu guards the pair (setup goroutine vs the
+	// version RPC goroutine).
 	tierMu       sync.Mutex
 	keyTier      string
 	enclaveAvail bool
@@ -124,19 +123,30 @@ func (s *Server) SetShutdown(f func()) { s.shutdown = f }
 // needed. SECURITY: it stores a build-version string, never a secret.
 func (s *Server) SetVersion(v string) { s.version = v }
 
-// SetKeyTier records the active identity-protection tier (and whether the Secure Enclave
-// is the active protection) for the future `version` RPC. avd calls it whenever it
-// wires/re-wires a tier at startup or after a live `setup` — and with ""/"none" when no
-// local vault exists. SECURITY: it stores metadata only, never a secret.
-func (s *Server) SetKeyTier(tier string, enclaveAvailable bool) {
+// SetKeyTier records the ACTIVE identity-protection tier for the `version` RPC. avd
+// calls it whenever it wires/re-wires a tier at startup or after a live `setup` — and
+// with ""/"none" when no local vault exists. SECURITY: it stores metadata only, never
+// a secret.
+func (s *Server) SetKeyTier(tier string) {
 	s.tierMu.Lock()
 	defer s.tierMu.Unlock()
 	s.keyTier = tier
-	s.enclaveAvail = enclaveAvailable
 }
 
-// KeyTier reports the active identity-protection tier and Enclave availability recorded
-// by SetKeyTier. It is the read side the future `version` RPC consumes.
+// SetEnclaveAvailable records whether THIS BUILD can use the Secure Enclave — a
+// capability independent of the active tier. avd sets it once at startup from
+// enclave.Available(); the `version` RPC surfaces it so `av version` can distinguish an
+// Enclave-incapable (unsigned) build from a capable one that simply has no enclave vault
+// yet. SECURITY: metadata only, never a secret.
+func (s *Server) SetEnclaveAvailable(v bool) {
+	s.tierMu.Lock()
+	defer s.tierMu.Unlock()
+	s.enclaveAvail = v
+}
+
+// KeyTier reports the active identity-protection tier and whether the build is
+// Enclave-capable (SetKeyTier + SetEnclaveAvailable). It is the read side the `version`
+// RPC consumes.
 func (s *Server) KeyTier() (tier string, enclaveAvailable bool) {
 	s.tierMu.Lock()
 	defer s.tierMu.Unlock()
@@ -320,16 +330,12 @@ func New(path string) (*Server, error) {
 		return nil, fmt.Errorf("create socket dir: %w", err)
 	}
 	lockPath := path + ".lock"
-	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := acquireInstanceLock(lockPath)
 	if err != nil {
-		return nil, fmt.Errorf("open lockfile: %w", err)
-	}
-	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		lock.Close()
-		if errors.Is(err, unix.EWOULDBLOCK) {
+		if errors.Is(err, errInstanceLocked) {
 			return nil, fmt.Errorf("avd already running at %s", path)
 		}
-		return nil, fmt.Errorf("flock lockfile: %w", err)
+		return nil, fmt.Errorf("lock instance: %w", err)
 	}
 
 	// Defense in depth: if a live peer somehow answers (e.g. an avd not using
@@ -350,8 +356,7 @@ func New(path string) (*Server, error) {
 
 // releaseLock drops the flock, closes the fd, and best-effort removes the
 // lockfile. Removal is best-effort: a racing New may have re-created it.
-func releaseLock(lock *os.File, lockPath string) {
-	_ = unix.Flock(int(lock.Fd()), unix.LOCK_UN)
+func releaseLock(lock instanceLock, lockPath string) {
 	_ = lock.Close()
 	_ = os.Remove(lockPath)
 }
