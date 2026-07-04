@@ -1,19 +1,20 @@
 # AgentVault
 
-An agent-agnostic secret broker for macOS. AI coding agents run real commands with
+An agent-agnostic secret broker for macOS, Linux, and Windows. AI coding agents run real commands with
 real credentials, but never see those credentials in plaintext: the value is injected
 into a child process and masked at the source, so anything the agent reads back —
-stdout, logs, errors — shows `{{AV:NAME}}` instead of the secret. macOS-only (v1).
+stdout, logs, errors — shows `{{AV:NAME}}` instead of the secret.
 
 ## How it works
 
 A resident daemon, `avd`, brokers secrets and redacts output; a thin `av` CLI talks to
-it over a local socket. `av run` resolves a profile's secrets, launches your command
-with them in its environment, and masks the values in the child's output at the source —
-the agent driving `av run` only ever sees `{{AV:NAME}}`. Brokering is gated by a
-Touch-ID-unlocked session; the vault's age key is protected at rest by the best tier the
-binary can provide (see [Identity protection tiers](#identity-protection-tiers)) and
-unwrapped only into that session, never held at rest.
+it over a private local OS endpoint (Unix socket on macOS/Linux, named pipe on Windows).
+`av run` resolves a profile's secrets, launches your command with them in its environment,
+and masks the values in the child's output at the source — the agent driving `av run`
+only ever sees `{{AV:NAME}}`. Brokering is gated by a native-presence-unlocked session;
+the vault's age key is protected at rest by the best tier the binary can provide (see
+[Identity protection tiers](#identity-protection-tiers)) and unwrapped only into that
+session, never held at rest.
 
 ## Documentation
 
@@ -23,9 +24,12 @@ This README is the one-page overview and reference. For step-by-step guides see
 - [Getting started](docs/getting-started.md) — install → daemon → first secret → `av run`
 - [Agent integration](docs/agent-integration.md) — wire AgentVault into Claude Code / any agent
 - [Security model](docs/security-model.md) — threat model, guarantees, identity tiers
-- [Troubleshooting](docs/troubleshooting.md) — Touch ID, locked vault, version skew, exit codes
+- [Platform support](docs/platforms.md) — Linux/Windows prerequisites and current gaps
+- [Troubleshooting](docs/troubleshooting.md) — native prompts, locked vault, version skew, exit codes
 
 ## Install
+
+macOS:
 
 ```sh
 brew install beshkenadze/tap/agentvault
@@ -33,12 +37,13 @@ brew install beshkenadze/tap/agentvault
 brew tap beshkenadze/tap && brew trust beshkenadze/tap
 ```
 
-Requires macOS and the Xcode Command Line Tools (the Touch ID path is built with cgo).
-
 `brew install` builds from source (an ad-hoc-signed binary), so the age key is protected
-by the **login keychain** — see [Identity protection tiers](#identity-protection-tiers).
+by the **OS keychain/keyring tier** — see [Identity protection tiers](#identity-protection-tiers).
 The strongest tier, the Secure Enclave, needs a signed binary and will arrive via a
 future signed Cask (`brew install --cask …`, planned).
+
+Linux and Windows builds are supported from source today. See [platform support](docs/platforms.md)
+for required desktop components and packaging status.
 
 ## Quick start
 
@@ -48,13 +53,12 @@ av setup                                # provision the vault + register avd to 
 av add GITHUB_TOKEN                     # hidden prompt; the value never touches argv
 ```
 
-`av setup` also registers `avd` to start at login (`SMAppService` on the signed cask, a
-per-user LaunchAgent on build-from-source). macOS shows a one-time "added background item"
-notice; manage it in **System Settings → General → Login Items** or with `av service
-on|off|status` (see [docs/launchagent.md](docs/launchagent.md)).
+`av setup` also registers `avd` to start at login via the native per-user service manager:
+macOS Login Items/LaunchAgent, Linux `systemd --user`, or Windows Task Scheduler. Manage
+it with `av service on|off|status`.
 
 No explicit `av unlock` is needed: the first operation that needs the key (here `av
-add`) prompts Touch ID on demand and opens the session for ~15 minutes. `av unlock`
+add`) prompts for native presence on demand and opens the session for ~15 minutes. `av unlock`
 stays available to warm the session up front, but it is optional.
 
 `av add` reads the value from a hidden prompt (or piped stdin) — never from the command
@@ -88,16 +92,16 @@ available, never silently downgrading to plaintext:
 
 | Tier          | At rest                                  | Where                                  |
 |---------------|------------------------------------------|----------------------------------------|
-| **Secure Enclave** | age key wrapped by a non-exportable Enclave key (`identity.enc`); never leaves hardware | a future signed Cask (`brew install --cask …`, planned) |
-| **keychain**  | age key in the login keychain (OS-encrypted at rest) | the build-from-source `brew install` (default there) |
+| **Secure Enclave** | age key wrapped by a non-exportable Enclave key (`identity.enc`); never leaves hardware | macOS signed Cask (planned) |
+| **keychain**  | age key in OS secure storage: macOS login Keychain, Linux Secret Service, Windows Credential Manager | default when Enclave is unavailable |
 | **plaintext** | age key unwrapped in `identity.txt` (0600) | only via `av setup --plaintext` (explicit) |
 
 `av setup` selection:
 
-- **auto** (default): try the Secure Enclave; on any failure (e.g. an unsigned binary)
-  fall back to the **keychain** with a loud warning. Plaintext is **never** chosen
-  automatically.
-- `--keychain` / `--enclave`: force a tier.
+- **auto** (default): try the Secure Enclave where available; otherwise fall back to the
+  **keychain** OS secure-storage tier. Plaintext is **never** chosen automatically.
+- `--keychain`: force the OS keychain/keyring tier.
+- `--enclave`: force the macOS Secure Enclave tier; unsupported on Linux/Windows.
 - `--require-enclave`: force the Enclave and **error** instead of downgrading (for a
   signed deployment that must not fall back).
 - `--plaintext`: force the plaintext tier (the explicit escape hatch).
@@ -114,14 +118,14 @@ Run `av version` to see which tier is active.
 
 The age key is only ever held in an unlocked, mlock'd session — zeroized on `lock`, TTL
 expiry, or auto-lock (screen-lock / sleep). The first operation that needs the key
-(`av add`, `av rm`, `av read`, `av run`) on a locked session prompts Touch ID on demand,
+(`av add`, `av rm`, `av read`, `av run`) on a locked session prompts native presence on demand,
 opens the session for ~15 minutes, and proceeds. `av unlock` is therefore optional — it
 just warms the session ahead of time.
 
 **Agents opt out.** The hook generated by `av init --agent …` exports `AV_NO_PROMPT=1`.
-With that set, `av` does not trigger a biometric prompt for a locked vault: the operation
+With that set, `av` does not trigger a native-presence prompt for a locked vault: the operation
 returns a clean **exit 69** ("vault locked — ask a human to unlock") instead of blocking
-on Touch ID. So an agent pauses cleanly for a human rather than stalling on a prompt it
+on a prompt. So an agent pauses cleanly for a human rather than stalling on a prompt it
 cannot satisfy.
 
 ## Backends
@@ -133,10 +137,27 @@ A reference is `av://<backend>/<locator>`.
 | age file   | `av://file/NAME`                 | read/write | `av setup` then `av add NAME` (`av rm` to drop) |
 | Keychain   | `av://keychain/<service>/<account>` | read-only | `security add-generic-password -s <service> -a <account> -w` |
 | 1Password  | `av://1p/<Vault>/<Item>/<field>` | read-only  | manage the item in 1Password (`op`); resolves via `op read` |
+| Bitwarden  | `av://bw/<object>/<id-or-search>` | read-only | manage the item in Bitwarden (`bw`); resolves via `bw get` |
 
 The age file backend is the only writable one — `av setup` provisions it and `av add` /
-`av rm` manage it. Keychain and 1Password are read-only: AgentVault resolves them but
-you populate and rotate them with their own tools.
+`av rm` manage it. Keychain, 1Password, and Bitwarden are read-only: AgentVault resolves
+them but you populate and rotate them with their own tools.
+
+Bitwarden uses the Password Manager CLI, not the Secrets Manager CLI. Supported
+`<object>` values are `password`, `username`, `uri`, `totp`, and `notes`; full `item`
+JSON is intentionally not exposed as a secret value. For a self-hosted Bitwarden server,
+configure and unlock `bw` first, then run `avd` in an environment where that CLI state is
+available:
+
+```sh
+bw config server https://your.bw.domain.com
+bw login
+export BW_SESSION="$(bw unlock --raw)"
+```
+
+If your self-hosted server uses a self-signed TLS certificate, set `NODE_EXTRA_CA_CERTS`
+for the `bw` process. AgentVault does not store or refresh `BW_SESSION`; it only invokes
+the already configured `bw` CLI.
 
 ## Manifest (`agentvault.yaml`)
 
@@ -154,9 +175,9 @@ profiles:
       tier: dangerous
 ```
 
-- **normal** — served from the unlocked session for its TTL (one Touch ID covers the
+- **normal** — served from the unlocked session for its TTL (one native-presence check covers the
   window).
-- **dangerous** — a fresh Touch ID per access; the value is never cached in the session.
+- **dangerous** — a fresh native-presence check per access; the value is never cached in the session.
 
 ## CLI
 
@@ -168,9 +189,9 @@ av read [--backend file|--profile P] NAME   print one secret to a TTY only (defa
 av add [--backend file] NAME            store a value (hidden prompt or stdin; never argv)
 av rm  [--backend file] NAME            delete a value from the writable vault
 av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]   provision the vault + register avd at login
-av service on|off|status                start avd at login (manage in System Settings → Login Items)
+av service on|off|status                start avd at login via the native per-user service manager
 av init --agent claude-code|generic [--dir D] [--force]   generate adapter files
-av unlock                               Touch ID — open the session (optional; ops auto-unlock)
+av unlock                               native presence — open the session (optional; ops auto-unlock)
 av lock                                 re-lock and clear issued values
 av status                               print lock state and remaining time
 av scrub                                filter stdin -> stdout through the redactor
@@ -189,15 +210,15 @@ secret-free exit codes: **69** (vault locked), **77** (access denied, dangerous 
 is an `av://` reference is resolved at runtime and injected into the child; literals like
 `MSSQL_PORT=1433` pass through unchanged. The `.env` refs merge with the `--profile`
 `agentvault.yaml` profile — a name defined in both is a hard error, not a guess at
-precedence. One Touch ID covers all normal-tier secrets (a single resolve), the output is
+precedence. One native-presence check covers all normal-tier secrets (a single resolve), the output is
 masked by default (`--no-mask` disables layer-1 source masking), and it is fail-closed: if
 any reference can't resolve, or neither a `.env` nor an `agentvault.yaml` source exists, no
 child is started. Secrets are never written to disk — the `.env` holds only references.
 
 `av setup` provisions the local age vault and **auto-picks the strongest key tier the
 binary can provide** (see [Identity protection tiers](#identity-protection-tiers)):
-keychain on the build-from-source `brew install`, Secure Enclave on a future signed
-build. `--plaintext` writes the identity unwrapped to `identity.txt` (an explicit escape
+OS keychain/keyring by default, Secure Enclave on eligible macOS signed builds.
+`--plaintext` writes the identity unwrapped to `identity.txt` (an explicit escape
 hatch — never chosen automatically); `--rotate` provisions a fresh identity and vault.
 
 `av version` prints `av`'s version and, when the daemon is reachable, `avd`'s version,
@@ -221,20 +242,18 @@ a human" error and pause instead.
   session's issued values plus a gitleaks detector for *derived* secrets the daemon
   never issued.
 - **Tiered key protection, session-scoped.** The vault's age identity is protected at
-  rest by the strongest tier the binary can provide — Secure Enclave (signed build),
-  else the login keychain (build-from-source default), with an explicit plaintext escape
-  hatch (see [Identity protection tiers](#identity-protection-tiers)). Every tier gates
-  the key behind Touch ID and holds it only in an `mlock`'d session, zeroized on `lock`,
-  TTL expiry, or auto-lock (screen-lock / sleep). The daemon does not unwrap at startup,
-  so there is no login-time prompt. The Enclave is the strongest tier — the key never
-  leaves hardware and a daemon compromise after lock cannot decrypt — but it requires a
-  signed build; the keychain tier still gates the key behind a presence check and the
-  session window.
-- **Local trust boundary.** `av` ↔ `avd` is a `0600` unix-domain socket with a
-  peer-credential check (same-UID only).
+  rest by the strongest tier the binary can provide — Secure Enclave on eligible macOS
+  builds, else OS secure storage, with an explicit plaintext escape hatch (see
+  [Identity protection tiers](#identity-protection-tiers)). Production tiers gate the key
+  behind native presence where implemented and hold it only in an `mlock`'d session,
+  zeroized on `lock`, TTL expiry, or auto-lock (screen-lock / sleep). The daemon does not
+  unwrap at startup, so there is no login-time prompt.
+- **Local trust boundary.** `av` ↔ `avd` is a private local endpoint: `0600`
+  unix-domain socket with peer-credential checks on macOS/Linux, or a current-user named
+  pipe ACL on Windows.
 - **Honest scope.** This is a *cooperative-agent* threat model: it stops an agent (and
-  its logs) from capturing plaintext it has no business seeing. It is macOS-only (v1)
-  and does **not** defend against an actively malicious same-user local attacker —
+  its logs) from capturing plaintext it has no business seeing. It does **not** defend
+  against an actively malicious same-user local attacker —
   malicious-agent defense is an explicit non-goal for v1.
 
 ## Agent integration
@@ -256,7 +275,7 @@ tests — verify them manually:
 - `docs/launchagent.md` — running `avd` at login and the `av service` login-item
   verification checklist.
 
-Build and test from source with `make build` and `make test`.
+Build and test from source with `make build`, `make test`, and `make cross-test`.
 
 > The `AV_TEST_AUTH`, `AV_TEST_ENCLAVE`, and `AV_TEST_KEYSTORE` environment variables
 > select stub presence / stub enclave / stub keystore for CI and the smoke scripts. They
@@ -265,6 +284,7 @@ Build and test from source with `make build` and `make test`.
 
 ## Status / non-goals
 
-macOS-only in v1. Linux/Windows support and additional backends (HashiCorp Vault, AWS
-Secrets Manager) are future work. Keychain and 1Password stay read-only — manage those
-secrets with their own tools.
+Linux/Windows support is source-build/desktop-prerequisite level. Windows Hello presence
+and Windows auto-lock still need native bridges before Windows reaches full macOS parity.
+Additional backends (HashiCorp Vault, AWS Secrets Manager) are future work. Keychain,
+1Password, and Bitwarden stay read-only — manage those secrets with their own tools.

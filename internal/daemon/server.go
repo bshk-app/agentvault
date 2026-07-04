@@ -15,8 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/beshkenadze/agentvault/internal/audit"
 	"github.com/beshkenadze/agentvault/internal/backend"
 	"github.com/beshkenadze/agentvault/internal/ipc"
@@ -43,7 +41,7 @@ const connIdleTimeout = 5 * time.Minute
 // Server owns the unix-socket listener and serves the JSON-RPC dispatch.
 type Server struct {
 	ln       net.Listener
-	lock     *os.File // exclusive flock held for the daemon's lifetime (I-1)
+	lock     instanceLock // exclusive process-wide lock held for the daemon's lifetime (I-1)
 	lockPath string
 	// checkPeer gates every connection on a peer-credential check. It defaults to
 	// transport.CheckPeer in New; it is an injectable seam so the reject-and-close
@@ -332,16 +330,12 @@ func New(path string) (*Server, error) {
 		return nil, fmt.Errorf("create socket dir: %w", err)
 	}
 	lockPath := path + ".lock"
-	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := acquireInstanceLock(lockPath)
 	if err != nil {
-		return nil, fmt.Errorf("open lockfile: %w", err)
-	}
-	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		lock.Close()
-		if errors.Is(err, unix.EWOULDBLOCK) {
+		if errors.Is(err, errInstanceLocked) {
 			return nil, fmt.Errorf("avd already running at %s", path)
 		}
-		return nil, fmt.Errorf("flock lockfile: %w", err)
+		return nil, fmt.Errorf("lock instance: %w", err)
 	}
 
 	// Defense in depth: if a live peer somehow answers (e.g. an avd not using
@@ -362,8 +356,7 @@ func New(path string) (*Server, error) {
 
 // releaseLock drops the flock, closes the fd, and best-effort removes the
 // lockfile. Removal is best-effort: a racing New may have re-created it.
-func releaseLock(lock *os.File, lockPath string) {
-	_ = unix.Flock(int(lock.Fd()), unix.LOCK_UN)
+func releaseLock(lock instanceLock, lockPath string) {
 	_ = lock.Close()
 	_ = os.Remove(lockPath)
 }

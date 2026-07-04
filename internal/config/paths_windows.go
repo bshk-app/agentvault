@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build windows
 
 // Package config resolves AgentVault's default on-disk locations (vault + identity).
 // SSOT for the zero-config store paths the daemon auto-discovers and `av setup` writes.
@@ -9,13 +9,17 @@ import (
 	"path/filepath"
 )
 
-// DefaultConfigDir is $XDG_CONFIG_HOME/agentvault, else ~/.config/agentvault.
+// DefaultConfigDir is %APPDATA%\AgentVault, falling back to the user config dir.
 func DefaultConfigDir() string {
-	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "agentvault")
+	if x := os.Getenv("APPDATA"); x != "" {
+		return filepath.Join(x, "AgentVault")
+	}
+	c, err := os.UserConfigDir()
+	if err == nil {
+		return filepath.Join(c, "AgentVault")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "agentvault")
+	return filepath.Join(home, "AppData", "Roaming", "AgentVault")
 }
 
 func DefaultVaultPath() string             { return filepath.Join(DefaultConfigDir(), "vault.age") }

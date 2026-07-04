@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build !darwin && !linux && !windows
 
 package transport
 
@@ -8,10 +8,10 @@ import (
 	"net"
 )
 
-// errPeerCredUnsupported is returned by every non-darwin peer-credential check.
-// v1 is macOS-only; rather than fake-allow a connection on a platform where we
-// cannot read the peer UID, the check FAILS CLOSED so a non-macOS build can
-// never silently bypass the same-UID guard.
+// errPeerCredUnsupported is returned by every platform without a peer-credential
+// implementation. Rather than fake-allow a connection on a platform where we cannot read
+// the peer UID, the check FAILS CLOSED so a build can never silently bypass the same-UID
+// guard.
 var errPeerCredUnsupported = errors.New("peer-credential check unsupported on this platform")
 
 // PeerUID is the non-darwin fallback. There is no portable way to read the peer

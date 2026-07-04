@@ -1,7 +1,7 @@
 // Package provision creates the local age store for `av setup`: a fresh X25519 identity
 // plus an empty age vault. The identity is protected by the best available TIER —
 // Secure-Enclave-wrapped (identity.enc) when an Enclave is reachable, otherwise stored in
-// the login keychain, with an explicit plaintext (identity.txt) escape hatch. The package
+// the OS secure store, with an explicit plaintext (identity.txt) escape hatch. The package
 // is linked only by avd, never by the thin av — so both the Wrap step and the keychain
 // sink are INJECTED (avd passes enclave.Wrap + keystore.Store; tests pass stubs), keeping
 // this package free of the cgo enclave import and the os/exec keystore. SECURITY: the
@@ -28,7 +28,7 @@ type Tier string
 const (
 	// TierEnclave wraps the identity in the Secure Enclave (on-disk identity.enc).
 	TierEnclave Tier = "enclave"
-	// TierKeychain stores the identity in the login keychain (no on-disk identity file).
+	// TierKeychain stores the identity in the OS keychain/keyring (no on-disk identity file).
 	TierKeychain Tier = "keychain"
 	// TierPlaintext writes the identity unwrapped to identity.txt (the explicit, opt-in
 	// escape hatch for hosts without an Enclave or keychain).
@@ -56,7 +56,7 @@ type Options struct {
 	// injected so this package needs no enclave import; it may be nil (auto then goes
 	// straight to the keychain).
 	Wrap func([]byte) ([]byte, error)
-	// KeychainStore persists the identity bytes in the login keychain (keystore.Store in
+	// KeychainStore persists the identity bytes in OS secure storage (keystore.Store in
 	// production, a recording stub in tests). Required whenever the keychain tier is used.
 	KeychainStore func([]byte) error
 }

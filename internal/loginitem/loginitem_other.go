@@ -1,10 +1,10 @@
-//go:build !darwin
+//go:build !darwin && !linux && !windows
 
 package loginitem
 
 import "errors"
 
-// ErrUnsupported reports that login-item registration is macOS-only.
+// ErrUnsupported reports that login-item registration is unsupported on this platform.
 var ErrUnsupported = errors.New("loginitem: unsupported on this platform")
 
 type unsupported struct{}

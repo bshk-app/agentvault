@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Package transport provides AgentVault's local unix-socket listener and dialer,
 // with a strict 0600 socket and a peer-credential check (see peercred_*.go).
 package transport

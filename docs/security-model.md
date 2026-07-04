@@ -10,8 +10,7 @@ agent — and everything that captures its context (its logs, its transcript, an
 server it talks to) — from seeing plaintext credentials it has no business seeing, while
 still letting it run the commands that need them.
 
-It is **macOS-only** in v1 and does **not** defend against an actively malicious,
-same-user local attacker. A process running as your user can, in principle, attach to the
+It does **not** defend against an actively malicious, same-user local attacker. A process running as your user can, in principle, attach to the
 daemon's memory while the session is unlocked or wait for you to type. Defending against a
 malicious *agent* (as opposed to a cooperative one whose context you want to keep clean)
 is an explicit non-goal for v1.
@@ -26,7 +25,7 @@ In scope:
 Out of scope (v1):
 
 - A malicious same-user process actively extracting an unlocked session.
-- Non-macOS platforms.
+- Headless/non-desktop Linux or Windows hosts without a native auth agent.
 - Defending against the agent itself being adversarial.
 
 ## The guarantees
@@ -45,8 +44,9 @@ Out of scope (v1):
   the value and exits **80** — an agent piping it gets nothing.
 - **Secret-free errors and exit codes.** Daemon errors map to stable, secret-free exit
   codes (see [the CLI reference](../README.md#cli)); no message ever wraps a value.
-- **Local trust boundary.** `av` ↔ `avd` is a `0600` unix-domain socket with a
-  peer-credential check (same-UID only).
+- **Local trust boundary.** `av` ↔ `avd` is a private local endpoint: `0600`
+  unix-domain socket with peer-credential checks on macOS/Linux, or a current-user named
+  pipe ACL on Windows.
 
 ## Identity protection tiers
 
@@ -56,16 +56,17 @@ available tier and never silently downgrades to plaintext.**
 
 | Tier | Key at rest | Available on |
 |------|-------------|--------------|
-| **Secure Enclave** | age key wrapped by a non-exportable Enclave key (`identity.enc`); never leaves hardware | a future signed Cask (`brew install --cask …`, planned) |
-| **keychain** | age key in the login keychain (OS-encrypted at rest) | the build-from-source `brew install` (default there) |
+| **Secure Enclave** | age key wrapped by a non-exportable Enclave key (`identity.enc`); never leaves hardware | macOS signed Cask (planned) |
+| **keychain** | age key in OS secure storage: macOS login Keychain, Linux Secret Service, Windows Credential Manager | default when Enclave is unavailable |
 | **plaintext** | age key unwrapped in `identity.txt` (0600) | only via `av setup --plaintext` (explicit opt-out) |
 
 ### How `av setup` chooses
 
-- **auto** (default, no flag): try the Secure Enclave; on any failure (e.g. an unsigned
-  binary) fall back to the **keychain** with a loud warning. Plaintext is **never** chosen
+- **auto** (default, no flag): try the Secure Enclave where available; otherwise fall
+  back to the **keychain** OS secure-storage tier. Plaintext is **never** chosen
   automatically.
-- `--keychain` / `--enclave`: force a specific tier.
+- `--keychain`: force the OS secure-storage tier.
+- `--enclave`: force the macOS Secure Enclave tier; unsupported on Linux/Windows.
 - `--require-enclave`: force the Enclave and **error** instead of downgrading — for a
   signed deployment that must not fall back.
 - `--plaintext`: force the plaintext tier (the explicit escape hatch).
@@ -93,20 +94,20 @@ is unwrapped only into an unlocked, `mlock`'d session, and that session is **zer
 - session TTL expiry (~15 minutes), and
 - auto-lock — screen lock or sleep.
 
-Every tier gates the key behind a Touch ID presence check before the session opens. With
-the Enclave tier the key never leaves hardware, so a daemon compromise *after* lock cannot
-decrypt the vault. With the keychain tier the key is gated behind the presence check and
-the session window, but is held in (locked) process memory while unlocked — consistent
-with the cooperative-agent threat model above.
+Production tiers gate the key behind native presence before the session opens where
+implemented. With the Enclave tier the key never leaves hardware, so a daemon compromise
+*after* lock cannot decrypt the vault. With the keychain tier the age identity is stored
+by the OS secure store and gated by the session window, but is held in process memory
+while unlocked — consistent with the cooperative-agent threat model above.
 
 ## Access tiers (per secret)
 
 Independently of the key tier, each manifest entry has an **access tier** that controls
 how often a presence check is required to *use* it:
 
-- **normal** — served from the unlocked session for its TTL; one Touch ID covers the
-  window.
-- **dangerous** — a fresh Touch ID per access; the value is never cached in the session.
+- **normal** — served from the unlocked session for its TTL; one native-presence check
+  covers the window.
+- **dangerous** — a fresh native-presence check per access; the value is never cached in the session.
 
 Use `dangerous` for the credentials whose every use you want to physically confirm.
 

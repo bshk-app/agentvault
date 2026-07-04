@@ -1,15 +1,13 @@
-//go:build !darwin
+//go:build !darwin && !linux && !windows
 
-// Package keystore on non-darwin platforms provides a stub Store so cmd/avd compiles and
-// cross-compiles everywhere. The login keychain (and the `security` CLI) exist only on
-// darwin; the real implementation lives in keystore_darwin.go. Here Store and Read always
-// fail with a clear, value-free "requires macOS" error.
+// Package keystore on platforms without a native implementation provides a stub Store so
+// cmd/avd compiles and cross-compiles everywhere. Store and Read always fail with a clear,
+// value-free unsupported error.
 package keystore
 
 import "errors"
 
-// errUnsupported is the value-free error returned by Store/Read on non-darwin.
-var errUnsupported = errors.New("keystore requires macOS")
+var errUnsupported = errors.New("os keystore unsupported on this platform")
 
 // Store is the non-darwin stub. It carries no state; every operation errors.
 type Store struct{}

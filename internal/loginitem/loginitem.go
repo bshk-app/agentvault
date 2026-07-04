@@ -32,8 +32,10 @@ func (s State) String() string {
 type Backend string
 
 const (
-	BackendSMAppService Backend = "smappservice"
-	BackendLaunchAgent  Backend = "launchagent"
+	BackendSMAppService  Backend = "smappservice"
+	BackendLaunchAgent   Backend = "launchagent"
+	BackendSystemdUser   Backend = "systemd-user"
+	BackendTaskScheduler Backend = "task-scheduler"
 )
 
 // Manager registers/unregisters avd as a login item. Implemented per-backend in

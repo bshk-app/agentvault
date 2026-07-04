@@ -1,6 +1,6 @@
 # AgentVault documentation
 
-AgentVault is an agent-agnostic secret broker for macOS: your AI coding agent runs
+AgentVault is an agent-agnostic secret broker for macOS, Linux, and Windows: your AI coding agent runs
 real commands with real credentials, but never sees those credentials in plaintext.
 
 Start with the [project README](../README.md) for the one-page overview and install.
@@ -13,7 +13,8 @@ These guides go deeper, task by task.
 | [Getting started](getting-started.md) | install, provision the vault (avd starts at login), store your first secret, and run a command with it — step by step |
 | [Agent integration](agent-integration.md) | wire AgentVault into Claude Code (or any agent) so its output is redacted automatically |
 | [Security model](security-model.md) | understand what AgentVault does and does not protect against, and how the key is protected at rest |
-| [Troubleshooting](troubleshooting.md) | fix a stuck Touch ID prompt, a locked vault, a version skew, or a confusing exit code |
+| [Platform support](platforms.md) | Linux/Windows prerequisites, service managers, and known gaps |
+| [Troubleshooting](troubleshooting.md) | fix a stuck native prompt, a locked vault, a version skew, or a confusing exit code |
 | [Signing & notarization](signing-and-notarization.md) | *(maintainers)* cut the signed, notarized release that unlocks the Secure Enclave tier |
 
 ## Reference
