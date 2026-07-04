@@ -2,6 +2,7 @@
 # Real-backend smoke for the Homebrew-installed av/avd:
 #   * macOS Keychain  — fully self-contained (adds a throwaway item, then deletes it)
 #   * 1Password       — tested only if you pass OP_REF='Vault/Item/field'
+#   * Bitwarden       — tested only if you pass BW_REF='password/GitHub'
 #
 # Auth defaults to the AV_TEST_AUTH=allow stub (no Touch ID) so the BACKEND wiring can
 # be validated on its own. Set REAL_AUTH=1 to use the REAL Touch ID path: `av unlock`
@@ -13,10 +14,14 @@
 # Usage:
 #   bash scripts/smoke-backends.sh                                  # keychain, stub auth
 #   OP_REF='AgentVault-Test/smoke/password' bash scripts/smoke-backends.sh   # + 1Password
+#   BW_REF='password/GitHub' bash scripts/smoke-backends.sh                  # + Bitwarden
 #   REAL_AUTH=1 OP_REF='AgentVault-Test/smoke/password' bash scripts/smoke-backends.sh
 #
 # For 1Password you must be signed in first (`op signin`, or the desktop-app CLI
 # integration). The avd this script starts inherits that session from your shell.
+# For Bitwarden you must configure and unlock `bw` first (`bw config server ...`,
+# `bw login`, then `export BW_SESSION="$(bw unlock --raw)"`). The avd this script
+# starts inherits BW_SESSION and BITWARDENCLI_APPDATA_DIR from your shell.
 set -uo pipefail
 
 AV="$(command -v av || true)"; AVD="$(command -v avd || true)"
@@ -73,6 +78,12 @@ echo
     echo "      ref: av://1p/$OP_REF"
     echo "      tier: normal"
   fi
+  if [ -n "${BW_REF:-}" ]; then
+    echo "  bw:"
+    echo "    BW:"
+    echo "      ref: av://bw/$BW_REF"
+    echo "      tier: normal"
+  fi
 } > "$WORK/agentvault.yaml"
 
 # Seed the keychain item. -A lets the (same) `security` binary read it via -w without a
@@ -112,6 +123,31 @@ if [ -n "${OP_REF:-}" ]; then
   fi
 else
   info "skipped 1Password: pass OP_REF='Vault/Item/field' to test it"
+fi
+
+# --- Bitwarden backend (real `bw`), optional ---
+if [ -n "${BW_REF:-}" ]; then
+  BW_BIN="$(command -v bw || true)"
+  if [ -n "$BW_BIN" ]; then
+    bw_status="$("$BW_BIN" status 2>/dev/null || true)"
+    case "$bw_status" in
+      *'"status": "unlocked"'*)
+        out="$("$AV" run --profile bw -- sh -c 'printf "B=%s\n" "$BW"' 2>>"$WORK/av.err")"
+        if [ "$out" = "B={{AV:BW}}" ]; then
+          ok "bitwarden resolve + mask -> {{AV:BW}}  (bw get $BW_REF)"
+        else
+          no "bitwarden (got: '$out' | last err: $(tail -n1 "$WORK/av.err" 2>/dev/null))"
+        fi
+        ;;
+      *)
+        info "skipped Bitwarden: 'bw status' is not unlocked — export BW_SESSION from 'bw unlock --raw' first"
+        ;;
+    esac
+  else
+    info "skipped Bitwarden: 'bw' not on PATH"
+  fi
+else
+  info "skipped Bitwarden: pass BW_REF='password/GitHub' to test it"
 fi
 
 if "$AV" lock >/dev/null 2>&1; then ok "av lock"; else no "av lock"; fi

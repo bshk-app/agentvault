@@ -21,7 +21,7 @@ func TestAvStaysThin(t *testing.T) {
 	if !strings.Contains(string(out), self) {
 		t.Fatalf("go list returned no deps for %s; output=%q", self, out)
 	}
-	for _, bad := range []string{"gitleaks", "wazero", "spf13/viper", "spf13/afero", "filippo.io/age", "internal/audit", "internal/backend/onepassword", "internal/backend/keychain", "internal/enclave"} {
+	for _, bad := range []string{"gitleaks", "wazero", "spf13/viper", "spf13/afero", "filippo.io/age", "internal/audit", "internal/backend/onepassword", "internal/backend/bitwarden", "internal/backend/keychain", "internal/enclave"} {
 		if strings.Contains(string(out), bad) {
 			t.Errorf("av must not link %q", bad)
 		}

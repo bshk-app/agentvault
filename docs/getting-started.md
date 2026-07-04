@@ -1,7 +1,8 @@
 # Getting started
 
 This walkthrough takes you from nothing to a command running with a brokered secret
-that your agent never sees in plaintext. It assumes macOS with Touch ID.
+that your agent never sees in plaintext. It uses the macOS Homebrew path; Linux/Windows
+source builds are covered in [platform support](platforms.md).
 
 > **New to the idea?** AgentVault runs a small resident daemon (`avd`) that holds your
 > secrets and injects them into the commands you run, masking the values in the output
@@ -16,8 +17,7 @@ brew install bshk-app/homebrew-tap/agentvault
 brew tap bshk-app/homebrew-tap && brew trust bshk-app/homebrew-tap
 ```
 
-Requires macOS and the Xcode Command Line Tools (the Touch ID path is built with cgo;
-the CLT ship clang, which Homebrew already requires).
+Requires macOS and the Xcode Command Line Tools for the Homebrew build.
 
 `brew install` builds from source as an ad-hoc-signed binary. That is fully supported —
 it means your vault key is protected by the **login keychain** (the Secure Enclave tier
@@ -39,7 +39,8 @@ Run it once.
 
 The first time `avd` registers, macOS shows a one-time "AgentVault added items that can
 run in the background" notice. You can toggle start-at-login any time in **System Settings
-→ General → Login Items**, or with `av service on` / `av service off`.
+→ General → Login Items**, or with `av service on` / `av service off`. Linux uses
+`systemd --user`; Windows uses Task Scheduler.
 
 > The LaunchAgent runs `avd` in your GUI session — the only context where the Touch ID
 > prompt can appear.
@@ -54,7 +55,7 @@ av version             # av/avd versions + active key tier + socket
 If `avd` shows `(not running)`, see [troubleshooting](troubleshooting.md#the-daemon-isnt-running).
 
 You do **not** need to run `av unlock` first. The first operation that needs the key
-prompts Touch ID on demand and opens the session for ~15 minutes (see
+prompts for native presence on demand and opens the session for ~15 minutes (see
 [auto-unlock](#auto-unlock-no-explicit-unlock-needed)).
 
 ## 3. Store a secret
@@ -67,7 +68,7 @@ av add GITHUB_TOKEN
 
 The value is read from a **hidden prompt** (or piped stdin) — never from the command
 line — so it stays out of your shell history and the process table. The first `av add`
-on a locked vault triggers Touch ID.
+on a locked vault triggers native presence.
 
 Piping works too (a single trailing newline is stripped; interior newlines are kept for
 multi-line secrets):
@@ -77,7 +78,8 @@ printf '%s' "$MY_TOKEN" | av add GITHUB_TOKEN
 ```
 
 Remove a value with `av rm GITHUB_TOKEN`. The age-file backend is the only writable one;
-Keychain and 1Password are read-only (see [the manifest reference](#the-manifest-agentvaultyaml)).
+Keychain, 1Password, and Bitwarden are read-only (see
+[the manifest reference](#the-manifest-agentvaultyaml)).
 
 ## 4. Describe a profile
 
@@ -135,13 +137,13 @@ child's output is masked by default, exactly as with `av run`.
 
 The age key is only ever held in an unlocked, `mlock`'d session — zeroized on `av lock`,
 on TTL expiry, and on auto-lock (screen-lock / sleep). The first operation that needs
-the key (`av add`, `av rm`, `av read`, `av run`) on a locked session prompts Touch ID on
+the key (`av add`, `av rm`, `av read`, `av run`) on a locked session prompts native presence on
 demand and proceeds.
 
 `av unlock` stays available to warm the session up front, but it is optional:
 
 ```sh
-av unlock     # Touch ID → "unlocked for 15m"
+av unlock     # native presence → "unlocked for 15m"
 av status     # "unlocked, 873s remaining"
 av lock       # re-lock and clear issued values
 ```
@@ -175,8 +177,8 @@ profiles:
 
 | Tier | Behavior |
 |------|----------|
-| `normal` | served from the unlocked session for its TTL — one Touch ID covers the window |
-| `dangerous` | a fresh Touch ID per access; the value is never cached in the session |
+| `normal` | served from the unlocked session for its TTL — one native-presence check covers the window |
+| `dangerous` | a fresh native-presence check per access; the value is never cached in the session |
 
 **Backends** — a reference is `av://<backend>/<locator>`:
 
@@ -185,10 +187,32 @@ profiles:
 | age file | `av://file/NAME` | read/write | `av add NAME` (`av rm NAME` to drop) |
 | Keychain | `av://keychain/<service>/<account>` | read-only | `security add-generic-password -s <service> -a <account> -w` |
 | 1Password | `av://1p/<Vault>/<Item>/<field>` | read-only | manage the item in 1Password (`op`); resolves via `op read` |
+| Bitwarden | `av://bw/<object>/<id-or-search>` | read-only | manage the item in Bitwarden (`bw`); resolves via `bw get` |
 
 The age file is the only writable backend (`av setup` provisions it, `av add`/`av rm`
-manage it). Keychain and 1Password are resolved read-only — populate and rotate them with
-their own tools.
+manage it). Keychain, 1Password, and Bitwarden are resolved read-only — populate and
+rotate them with their own tools.
+
+Bitwarden backend details:
+
+- Uses Bitwarden Password Manager CLI `bw`, not Bitwarden Secrets Manager CLI `bws`.
+- Supported refs are `av://bw/password/<id-or-search>`,
+  `av://bw/username/<id-or-search>`, `av://bw/uri/<id-or-search>`,
+  `av://bw/totp/<id-or-search>`, and `av://bw/notes/<id-or-search>`.
+- Full `av://bw/item/...` JSON is not supported in v1 because partial values inside the
+  item would not be guaranteed to exact-match-redact if printed separately.
+- For self-hosted Bitwarden, configure and unlock `bw` before resolving through
+  AgentVault:
+
+```sh
+bw config server https://your.bw.domain.com
+bw login
+export BW_SESSION="$(bw unlock --raw)"
+```
+
+If your self-hosted server uses a self-signed TLS certificate, set `NODE_EXTRA_CA_CERTS`
+for the `bw` process. AgentVault does not store or refresh `BW_SESSION`; start or restart
+`avd` from an environment where the intended Bitwarden CLI state is available.
 
 ## Next steps
 

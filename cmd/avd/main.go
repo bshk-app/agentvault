@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"github.com/beshkenadze/agentvault/internal/audit"
 	"github.com/beshkenadze/agentvault/internal/backend"
 	"github.com/beshkenadze/agentvault/internal/backend/agefile"
+	"github.com/beshkenadze/agentvault/internal/backend/bitwarden"
 	"github.com/beshkenadze/agentvault/internal/backend/keychain"
 	"github.com/beshkenadze/agentvault/internal/backend/onepassword"
 	"github.com/beshkenadze/agentvault/internal/config"
@@ -186,10 +188,10 @@ func openAuditLog(socketPath string) audit.Logger {
 // env vars are set — AUTO-DISCOVERED at the config defaults (config.DefaultVaultPath +
 // identity.enc/identity.txt), so a `brew install → av setup` store needs zero env. If
 // neither a configured nor a discovered store exists, the file backend is simply skipped
-// (the daemon still runs; `av setup` can provision it live). The 1Password ("1p") and
-// keychain backends are registered UNCONDITIONALLY: both are lazy — they never touch
-// their CLI at registration time, only on Resolve — so wiring them costs nothing until a
-// matching ref is resolved. It logs which ids were registered to the daemon's own stderr
+// (the daemon still runs; `av setup` can provision it live). The 1Password ("1p"),
+// Bitwarden ("bw"), and keychain backends are registered UNCONDITIONALLY: all are lazy
+// — they never touch their CLI at registration time, only on Resolve — so wiring them
+// costs nothing until a matching ref is resolved. It logs which ids were registered to the daemon's own stderr
 // — NEVER a secret value.
 //
 // IDENTITY PRECEDENCE (env wins over auto-discovery; within each, Enclave wins over
@@ -263,6 +265,12 @@ func registerBackends(reg *backend.Registry, sess *daemon.Session, srv *daemon.S
 	// real `op read` and needs `op` installed + signed in (verified manually, not in CI).
 	reg.Register("1p", onepassword.New())
 	registered = append(registered, "1p")
+
+	// Lazy: registering does not invoke `bw`. Resolve of av://bw/... shells out to the
+	// real `bw get` and relies on the user's preconfigured Bitwarden CLI server/login/
+	// unlock state, including self-hosted setups via `bw config server ...`.
+	reg.Register("bw", bitwarden.New())
+	registered = append(registered, "bw")
 
 	// Lazy: registering does not invoke `security`. Resolve of av://keychain/... shells
 	// out to the real `security find-generic-password` and needs macOS + a populated
@@ -480,6 +488,9 @@ func makeProvisioner(reg *backend.Registry, sess *daemon.Session, srv *daemon.Se
 		tier := provision.Tier(p.Tier)
 		if tier == "" && p.Plaintext {
 			tier = provision.TierPlaintext
+		}
+		if tier == provision.TierEnclave && runtime.GOOS != "darwin" {
+			return ipc.SetupResult{}, errors.New("secure enclave tier requires macOS")
 		}
 		r, err := provision.Provision(provision.Options{
 			Rotate:         p.Rotate,
