@@ -114,11 +114,11 @@ type ScrubResult struct {
 // exists.
 //
 // Tier picks the protection tier explicitly ("enclave"/"keychain"/"plaintext"); ""
-// means auto (Enclave where available → OS keychain/keyring, never plaintext).
-// RequireEnclave forbids the Enclave→keychain downgrade so a Wrap failure becomes a hard
-// error instead of a silent keychain fallback. Plaintext is the LEGACY flag kept for
-// back-compat: when Tier is unset it is mapped to Tier=plaintext. New callers should set
-// Tier directly.
+// means auto (Enclave→keychain, never plaintext). RequireEnclave forbids the
+// Enclave→keychain downgrade so a Wrap failure becomes a hard error instead of a
+// silent keychain fallback. Plaintext is the LEGACY flag kept for back-compat: when
+// Tier is unset it is mapped to Tier=plaintext (the explicit escape hatch for hosts
+// without a Secure Enclave / cgo). New callers should set Tier directly.
 type SetupParams struct {
 	Rotate         bool   `json:"rotate,omitempty"`
 	Plaintext      bool   `json:"plaintext,omitempty"`
