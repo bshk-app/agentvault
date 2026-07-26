@@ -529,6 +529,14 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
 		}
+		// The reserved SOPS namespace is refused before ANYTHING else touches this request
+		// (see sops_namespace.go). It needs only the two names the client already sent, so
+		// it runs ahead of the backend lookup; and ahead of the unlock gate because a write
+		// that was always going to be refused must not cost a Touch ID — nor let a caller
+		// read the lock state off which refusal comes back.
+		if err := sopsNamespaceError(p.Backend, p.Locator); err != nil {
+			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
+		}
 		// Resolve the writable backend FIRST so a routing/config fault (unknown / read-only
 		// backend, or no local vault yet) surfaces its precise hint regardless of lock state;
 		// THEN open the session on demand before the actual write (one Touch ID, or CodeLocked
@@ -552,6 +560,11 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 	case "rm":
 		var p ipc.RmParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
+		}
+		// Reserved namespace first, same as "add" — and here it also stops `av rm sops/mykey`
+		// destroying the only copy of a SOPS private key by ordinary means.
+		if err := sopsNamespaceError(p.Backend, p.Locator); err != nil {
 			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
 		}
 		// Backend-resolution hint first (see "add"), then the on-demand unlock before Remove.

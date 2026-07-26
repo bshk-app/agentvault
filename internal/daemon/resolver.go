@@ -113,6 +113,23 @@ func (r *Resolver) Resolve(profile string, manifestBytes []byte) (map[string]str
 	}
 	out := make(map[string]string, len(p))
 	for name, e := range p {
+		// The reserved SOPS namespace is refused before ANY per-entry work: before the lock
+		// check, before a dangerous-tier presence prompt, and before the issuance budget is
+		// drawn on. See sops_namespace.go.
+		//
+		// The guard lives here rather than in the "resolve" dispatch case because THIS is
+		// where a locator first exists — dispatch holds only unparsed manifest bytes, and
+		// re-parsing them there to look would mean two parsers to keep in agreement. Sitting
+		// on the parsed entry also covers every route into the resolver at once: av read's
+		// synthetic one-entry manifest, an agentvault.yaml profile, and a `.env` line
+		// `KEY=av://file/sops/mykey` that av env turns into an entry.
+		//
+		// Returning aborts the whole resolve, so a manifest that batches a sops/ ref beside
+		// a healthy one yields NOTHING — no partial result is ever returned (see the doc
+		// comment above), so the refusal cannot be diluted by batching.
+		if err := sopsNamespaceRefError(e.Ref); err != nil {
+			return nil, fmt.Errorf("%w: entry %q: %v", ErrBadRequest, name, err)
+		}
 		switch e.Tier {
 		case manifest.TierNormal:
 			// Served from an open session; never prompts mid-run.
