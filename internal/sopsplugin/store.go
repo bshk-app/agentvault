@@ -1,0 +1,244 @@
+package sopsplugin
+
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+
+	"filippo.io/age"
+
+	"github.com/beshkenadze/agentvault/internal/backend"
+)
+
+// Namespace prefixes every SOPS identity stored in the shared vault. Reusing the vault
+// rather than opening a second encrypted file means the atomic write, the flock, and the
+// encryption in internal/backend/agefile are written once; the prefix is what keeps the
+// two populations of secrets apart inside it.
+//
+// It is the SINGLE source for that prefix: the Store writes it, and `av read` refuses
+// names under it. That refusal is the whole reason a private key here cannot be printed
+// the way an ordinary secret can, so the two must not drift.
+const Namespace = "sops/"
+
+// Tier says how often an identity has to prove presence. `normal` spends one presence
+// check per command, so a `helm secrets template` over thirty files costs one touch;
+// `dangerous` spends one PER FILE, which is deliberately slow — a production deploy should
+// be hard to perform absent-mindedly.
+//
+// The vocabulary matches manifest.Tier and audit.Event.Tier rather than importing either.
+// audit already spells it as a bare string for the same reason: manifest is the parser for
+// agentvault.yaml, and a stored SOPS identity is not a manifest entry. Keeping the type
+// local also keeps a YAML parser out of age-plugin-av, which imports this package.
+type Tier string
+
+const (
+	TierNormal    Tier = "normal"
+	TierDangerous Tier = "dangerous"
+)
+
+// Identity is a stored SOPS identity WITH its private key. Get and FindByRecipient are the
+// only functions that return one, and they exist precisely to fetch the key; nothing else
+// in this package hands one out. Key is age's own type rather than the AGE-SECRET-KEY-1…
+// text so the material can be used (Unwrap, Recipient) without ever being rendered.
+type Identity struct {
+	Name string
+	Tier Tier
+	Key  *age.X25519Identity
+}
+
+// Info is an identity WITHOUT its private key — the view `av sops ls` prints. It carries
+// the recipient, which is public by construction, and deliberately has no field that could
+// hold key material. Adding one would defeat the namespace.
+type Info struct {
+	Name      string
+	Recipient string
+	Tier      Tier
+}
+
+// storedIdentity is the JSON envelope held in one vault entry. The vault maps name to a
+// single string, so the tier has to travel INSIDE the value: a sibling `sops/<name>.tier`
+// entry would be a second write that can diverge from the first, and agefile.Add commits
+// one entry at a time, so a crash between them leaves a key with no tier or a tier with no
+// key. One envelope is one atomic entry, and it takes new fields without a migration.
+type storedIdentity struct {
+	Key  string `json:"key"`
+	Tier Tier   `json:"tier,omitempty"`
+}
+
+// Store keeps SOPS identities in the vault under Namespace. It depends on the backend
+// interfaces rather than *agefile.Backend so the daemon can pass the real vault and tests
+// can pass a fake — and so the read paths cannot reach a write method at all.
+type Store struct {
+	reader backend.Backend
+	writer backend.Writer
+}
+
+// NewStore returns a Store over an existing vault. Both arguments are normally the same
+// *agefile.Backend, which implements the read and write halves.
+func NewStore(b backend.Backend, w backend.Writer) *Store {
+	return &Store{reader: b, writer: w}
+}
+
+// Put stores key under name. It takes a parsed *age.X25519Identity, not the key's text, so
+// an unparseable key cannot reach the vault and no caller has to handle a bare private-key
+// string to use this package.
+//
+// The tier is validated HERE and nowhere else. The write is the last moment a typo is cheap
+// to fix — `av sops keygen NAME --tier normla` must fail at the prompt rather than store an
+// identity whose tier silently reads back as normal months later. Reads are tolerant by
+// design; see decode.
+func (s *Store) Put(name string, key *age.X25519Identity, tier Tier) error {
+	if name == "" {
+		return fmt.Errorf("sops identity: name must not be empty")
+	}
+	switch tier {
+	case "":
+		tier = TierNormal
+	case TierNormal, TierDangerous:
+	default:
+		// Names the offending tier only. key is in scope and must not appear.
+		return fmt.Errorf("sops identity %q: invalid tier %q (want %s|%s)", name, tier, TierNormal, TierDangerous)
+	}
+	// SECURITY: key.String() is the private key. It goes into the envelope and straight
+	// into the vault; it is never logged and never reaches an error from here on.
+	value, err := json.Marshal(storedIdentity{Key: key.String(), Tier: tier})
+	if err != nil {
+		// Unreachable for a struct of strings, and deliberately not wrapped anyway:
+		// json's own errors quote the offending value, and the value here is the key.
+		return fmt.Errorf("sops identity %q: could not be encoded for storage", name)
+	}
+	return s.writer.Add(Namespace+name, string(value))
+}
+
+// Get returns the identity stored under name, private key included. It is one of the two
+// functions in this package that may do that. A name nobody stored returns
+// backend.ErrNotFound unchanged, so callers can tell a typo from a real failure.
+func (s *Store) Get(name string) (Identity, error) {
+	sec, err := s.reader.Resolve(Namespace + name)
+	if err != nil {
+		return Identity{}, err
+	}
+	return decode(name, sec.Value)
+}
+
+// List returns every stored identity WITHOUT its private key, sorted by name. The sort is
+// not cosmetic: the vault is a map, so unsorted output would reorder itself on every
+// `av sops ls` against an unchanged vault.
+//
+// It costs one vault decrypt per identity, because backend.Backend exposes Resolve and
+// List and nothing that reads several values at once. That is bounded by how many SOPS
+// keys a person has — one or two — and the alternative is a wider backend interface every
+// backend would have to implement for this one caller.
+func (s *Store) List() ([]Info, error) {
+	ids, err := s.each()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Info, 0, len(ids))
+	for _, id := range ids {
+		// The private key stops here. Only the recipient derived from it goes out.
+		out = append(out, Info{Name: id.Name, Recipient: id.Key.Recipient().String(), Tier: id.Tier})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// FindByRecipient returns the identity whose public key is r, or backend.ErrNotFound when
+// no stored identity matches. The daemon calls it on every file sops touches, BEFORE
+// spending a presence check, so a repo full of files encrypted to other people costs zero
+// prompts.
+//
+// It takes a parsed *age.X25519Recipient on purpose. The recipient arrives from the wire as
+// the bech32 "age1…" TEXT of the key (see EncodeIdentity) — base64-of-ASCII once JSON has
+// had it — not as 32 raw bytes. A caller comparing raw bytes against that text would never
+// match and would report every file as "not yours", so the only way in is through
+// age.ParseX25519Recipient and the comparison lives here rather than at each call site.
+func (s *Store) FindByRecipient(r *age.X25519Recipient) (Identity, error) {
+	ids, err := s.each()
+	if err != nil {
+		return Identity{}, err
+	}
+	want := r.String()
+	for _, id := range ids {
+		// Compare the canonical bech32 text of both sides. Deriving the recipient from
+		// the stored key is cheap and keeps the vault free of a public index that could
+		// disagree with the keys it indexes.
+		if id.Key.Recipient().String() == want {
+			return id, nil
+		}
+	}
+	return Identity{}, backend.ErrNotFound
+}
+
+// Remove deletes the identity stored under name, returning backend.ErrNotFound if there was
+// none. `av sops rm` needs that distinction: it destroys the only copy of a key, and
+// reporting success over a mistyped name would leave the user believing a key is gone that
+// is still there — or, worse, that the right one was deleted when it was not.
+func (s *Store) Remove(name string) error {
+	return s.writer.Remove(Namespace + name)
+}
+
+// each decodes every identity in the namespace. It is the shared scan behind List and
+// FindByRecipient.
+//
+// A corrupt entry fails the whole scan rather than being skipped. Only the daemon holding
+// the vault identity can write here, so a broken entry means something went genuinely
+// wrong, and a user whose entry got mangled has to be told: silently skipping it would
+// surface as "no identity matched" for a key that is sitting right there in `av sops ls`.
+func (s *Store) each() ([]Identity, error) {
+	metas, err := s.reader.List(Namespace)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Identity, 0, len(metas))
+	for _, m := range metas {
+		name := strings.TrimPrefix(m.Locator, Namespace)
+		sec, err := s.reader.Resolve(m.Locator)
+		if err != nil {
+			return nil, err
+		}
+		id, err := decode(name, sec.Value)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// decode reads one stored value back into an Identity.
+//
+// Two formats are accepted. The envelope is what Put writes. A bare AGE-SECRET-KEY-1… is
+// what a hand-edited vault or an entry predating tiers holds; refusing it would lock a user
+// out of a key that is right there, which is worse than assuming the documented default
+// tier. A leading "{" tells them apart, so a MALFORMED envelope is an error rather than
+// being mistaken for a key and failing later with a stranger message.
+//
+// An unrecognised tier reads as normal rather than erroring. Writing one requires already
+// being able to decrypt and re-encrypt the vault, and anyone who can do that can read the
+// key itself — so the tier is not a barrier against them, and tolerating a typo costs
+// nothing they did not already have.
+//
+// SECURITY: value is a private key. Every error here names the identity and stops. age's
+// own parse errors are NOT wrapped: bech32 decoding reports characters of the string it
+// rejected by position and byte value (filippo.io/age/internal/bech32/bech32.go:154,161),
+// and that string is the key.
+func decode(name, value string) (Identity, error) {
+	env := storedIdentity{Key: value}
+	if strings.HasPrefix(strings.TrimSpace(value), "{") {
+		if err := json.Unmarshal([]byte(value), &env); err != nil {
+			// Not wrapped: json errors quote the offending input.
+			return Identity{}, fmt.Errorf("sops identity %q: stored entry is not readable", name)
+		}
+	}
+	key, err := age.ParseX25519Identity(env.Key)
+	if err != nil {
+		return Identity{}, fmt.Errorf("sops identity %q: stored entry is not a valid age private key", name)
+	}
+	tier := env.Tier
+	if tier != TierNormal && tier != TierDangerous {
+		tier = TierNormal
+	}
+	return Identity{Name: name, Tier: tier, Key: key}, nil
+}
