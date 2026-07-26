@@ -373,9 +373,24 @@ git commit -am "feat(sops): refuse av read on the sops/ namespace"
 
 ## Task 6: The `sops_unwrap` RPC
 
+**Requirement carried from Task 5's review — do this as part of wiring, not as an afterthought.**
+
+This task creates the **first production construction of `sopsplugin.NewStore`**, and that is where Task 5's namespace guard stops being safe by construction.
+
+The guard keys on the `file` backend plus the `sops/` prefix, which is correct — a blanket string rule would refuse `av://1p/sops/prod/key`, a 1Password vault named "sops", for zero protection. But `NewStore(b backend.Backend, w backend.Writer)` accepts *any* backend, and today nothing enforces that the one it gets is the one the guard protects. Someone later writing `NewStore(keychainBE, …)` would see no warning — the note lives in `internal/daemon/sops_namespace.go`, while the breaking line gets written in the daemon wiring — and the failure is silent: `av read keychain/sops/x` prints an age private key.
+
+**So: construct the Store through the same identifier the guard uses.** Export the backend id from `sopsplugin` (`VaultBackendID` or similar), have `sopsNamespaceBackend` and the wiring both reference it, and the invariant becomes structural instead of documentary. One symbol; do not skip it.
+
+**Three small items from Task 5's review to fold in while you are in these files:**
+
+1. `internal/daemon/resolver.go` — one sentence noting that dispatch's `ensureUnlockedResp` (`server.go:461`) still runs *before* the resolve guard, so a locked `av read sops/x` spends a presence check and returns `CodeLocked` rather than `CodeBadRequest`. The behaviour is right and not worth the second manifest parse it would cost to change; the comment must just not let a reader infer that `add`/`rm`'s stronger ordering carries over.
+2. `TestSopsNamespaceIsScopedToTheLocalVault` asserts only that the message lacks `"av sops"`, never that the resolve failed. Seed a `sops/` key into the mock backend and the test passes while proving nothing. Assert the failure and the not-found.
+3. `TestSopsNamespaceBoundaries` drives `add` only. The security-relevant direction of "`SOPS/mykey` is allowed" is on the read path — add one sub-case through `sopsResolve`.
+
 **Files:**
 - Modify: `internal/ipc/proto.go`
 - Modify: `internal/daemon/server.go` (new case in `dispatch`, line 418)
+- Modify: `internal/sopsplugin/store.go` (export the backend id), `internal/daemon/sops_namespace.go`, `internal/daemon/resolver.go`
 - Create: `internal/daemon/sops_rpc_test.go` (mirror `internal/daemon/addrm_rpc_test.go`)
 
 **Step 1: Add the wire types** to `internal/ipc/proto.go`:
