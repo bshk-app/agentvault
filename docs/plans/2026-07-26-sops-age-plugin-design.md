@@ -127,8 +127,20 @@ separate decryption. Touch ID on every file would make the feature unusable.
   command runs inside the open session. One touch per `helm upgrade`.
 - **Per-identity `--tier dangerous`:** presence on every file. Slow on purpose — a
   production deploy should be hard to perform absent-mindedly.
-- Rate limiting and audit come free from `internal/daemon/ratelimit.go` and
-  `internal/audit`. Each unwrap logs the identity name and the outcome, never a value.
+- Audit comes free from `internal/audit`. Each unwrap that reached an identity logs its
+  name, tier, and outcome — never a value. An unknown recipient logs nothing: there is no
+  identity to name, and one line per foreign file would drown the log exactly where it
+  matters least.
+- **Rate limiting deliberately does not apply here, correcting this document's first
+  draft.** The limiter in `internal/daemon/ratelimit.go` belongs to the `Resolver` and its
+  budget — 30 issuances per 60s — is sized for per-*command* issuance. An unwrap happens
+  per *file*, so wiring the existing limiter in would force-relock the session partway
+  through a `kustomize build` over any repo with 30+ encrypted files, turning a working
+  setup into an intermittent one. Metering unwraps would need its own, far larger budget.
+  Leaving them unmetered is consistent with the threat model in `docs/security-model.md`,
+  which is cooperative-agent: the limiter exists to blunt mass enumeration by a confused
+  agent, and an agent that can call `sops_unwrap` at will can equally call `sops -d` at
+  will.
 
 ### 6. Agents fail fast, as they do everywhere else
 
