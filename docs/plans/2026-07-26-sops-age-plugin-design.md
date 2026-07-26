@@ -258,8 +258,10 @@ deadlocks the daemon. Constraint: hold no lock across the `exec`.
 
 ## Open risks
 
-- **Windows plugin discovery.** age's plugin lookup on Windows is untested here. Verify
-  before promising Windows parity.
+- **Windows plugin discovery.** The Task 1 spike now builds its test plugin with a `.exe`
+  suffix, so it exercises age's plugin lookup when run on Windows. No CI job executes tests
+  on Windows (`make cross-test` only compiles), so the risk stands until someone runs
+  `go test ./internal/sopsplugin/` there.
 - **SOPS version floor.** Plugin support landed in 3.10. `av sops import` should detect an
   older `sops` and say so rather than let decryption fail obscurely.
 - **`sops updatekeys` through the plugin.** It decrypts and re-encrypts, so it should work

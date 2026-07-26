@@ -1,4 +1,4 @@
-// Package sopsplugin holds the AgentVault age plugin's daemon-facing logic.
+// Package sopsplugin_test holds the spike proving the SOPS design's central claim.
 package sopsplugin_test
 
 import (
@@ -20,8 +20,8 @@ import (
 // decrypts through a plugin. Passing means SOPS files keep their normal recipients, so
 // Flux, CI, and teammates decrypt them unchanged. Failing invalidates the design.
 func TestPluginUnwrapsStandardX25519Stanza(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("plugin discovery on Windows is verified by the smoke script, not here")
+	if testing.Short() {
+		t.Skip("integration: builds the test plugin binary")
 	}
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -42,8 +42,17 @@ func TestPluginUnwrapsStandardX25519Stanza(t *testing.T) {
 	}
 
 	// Build the test plugin and put it on PATH under the name age discovers it by.
+	// The .exe suffix is what makes this runnable on Windows, where exec.LookPath
+	// resolves names through PATHEXT. Nothing else here is platform-specific, so the
+	// test CAN supply the Windows plugin-discovery evidence the design doc wants — but
+	// only when someone actually runs it on Windows. No CI job does: `make cross-test`
+	// compiles for windows/amd64, it does not execute. Windows stays unverified.
+	name := "age-plugin-avtest"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
 	dir := t.TempDir()
-	build := exec.Command("go", "build", "-o", filepath.Join(dir, "age-plugin-avtest"), "./testdata/plugin")
+	build := exec.Command("go", "build", "-o", filepath.Join(dir, name), "./testdata/plugin")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build test plugin: %v\n%s", err, out)
 	}
@@ -53,9 +62,8 @@ func TestPluginUnwrapsStandardX25519Stanza(t *testing.T) {
 	// A nil *ClientUI panics: the client calls methods on it that read its callback
 	// fields unconditionally. The spike must not interact, so every callback errors —
 	// that turns an unexpected prompt into a named failure instead of a silent "fail"
-	// stanza. The identity carries no data: age.X25519Recipient exports no accessor for
-	// its 32 bytes, and the test plugin ignores data anyway (plugin.NewIdentityWithoutData
-	// encodes exactly this). Task 2 gives the real identity a recipient payload.
+	// stanza. The identity carries no data: the test plugin ignores it anyway. Task 2
+	// gives the real identity a recipient payload.
 	ui := &plugin.ClientUI{
 		DisplayMessage: func(name, message string) error {
 			return fmt.Errorf("unexpected message from plugin %q", name)
@@ -67,7 +75,7 @@ func TestPluginUnwrapsStandardX25519Stanza(t *testing.T) {
 			return false, fmt.Errorf("unexpected confirmation request from plugin %q", name)
 		},
 	}
-	pid, err := plugin.NewIdentity(plugin.EncodeIdentity("avtest", nil), ui)
+	pid, err := plugin.NewIdentityWithoutData("avtest", ui)
 	if err != nil {
 		t.Fatal(err)
 	}
