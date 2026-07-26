@@ -581,6 +581,11 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		s.audit.Log(audit.Event{Kind: "rm", Name: p.Locator, Profile: p.Backend})
 		ok, _ := json.Marshal("ok")
 		return ipc.Response{ID: req.ID, Result: ok}
+	case "sops_unwrap":
+		// Serves age-plugin-av: unwrap ONE file's key with a stored SOPS identity, so the
+		// SOPS private key never leaves this process. The body lives in sops_rpc.go, next
+		// to the namespace guard whose backend id it shares.
+		return s.sopsUnwrap(req)
 	case "setup":
 		var p ipc.SetupParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {

@@ -61,6 +61,19 @@ func (r *Registry) List(backendID, prefix string) ([]Meta, error) {
 	return b.List(prefix)
 }
 
+// Backend returns the registered backend under backendID, with ok=false when nothing is
+// registered there. It is the READ half of Writer, for the one caller that needs a
+// backend as a value rather than a reference to resolve: the daemon builds its SOPS
+// identity store over BOTH halves of the local vault, and a Writer alone cannot be read
+// through. Resolve stays the way to fetch a single value — this is not a back door around
+// it, it returns the same backend Resolve would dispatch to.
+func (r *Registry) Backend(backendID string) (Backend, bool) {
+	r.mu.RLock()
+	b, ok := r.backends[backendID]
+	r.mu.RUnlock()
+	return b, ok
+}
+
 // Writer returns the registered backend under backendID as a Writer, with ok=true
 // only if it both exists AND supports writes (implements Writer). A read-only backend
 // (1p, keychain) is registered but returns ok=false, so the caller (the "add"/"rm"

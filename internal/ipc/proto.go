@@ -83,6 +83,48 @@ type RmParams struct {
 	NoPrompt bool `json:"no_prompt,omitempty"`
 }
 
+// SopsStanza is one age header stanza, ferried verbatim between age-plugin-av and the
+// daemon. It mirrors age.Stanza field for field so the plugin can hand over exactly what
+// age gave it, without interpreting a format neither side owns.
+//
+// SECURITY: Body is the WRAPPED file key — ciphertext, useless without the private key
+// the daemon holds — so it is not a secret value in the sense AddParams.Value is. It is
+// still never logged: it is the input half of an unwrap, and pairing it with anything
+// else in a log line is a favour to whoever reads that log.
+type SopsStanza struct {
+	Type string   `json:"type"`
+	Args []string `json:"args"`
+	Body []byte   `json:"body"`
+}
+
+// SopsUnwrapParams asks the daemon to unwrap one file's key. Recipient names WHICH stored
+// SOPS identity to use, so the daemon can reject a file this vault holds no key for
+// BEFORE spending a presence prompt on it — the difference between `kustomize build` over
+// a repo of other people's secrets costing zero prompts and costing one per file.
+//
+// SECURITY: Recipient is a PUBLIC key, not a secret. It carries the bech32 "age1…" TEXT
+// of the recipient (see sopsplugin.EncodeIdentity), not 32 raw bytes — Go marshals []byte
+// as base64, so what crosses the wire is base64-of-ASCII. Parse it with
+// age.ParseX25519Recipient(string(p.Recipient)); a bytes.Equal against a raw key compares
+// text to bytes and silently never matches.
+//
+// NoPrompt mirrors ResolveParams.NoPrompt: false lets a locked session be opened with one
+// Touch ID before the unwrap; true (agents, via AV_NO_PROMPT) returns CodeLocked instead
+// of blocking a machine on a biometric nobody is there to answer.
+type SopsUnwrapParams struct {
+	Recipient []byte       `json:"recipient"`
+	Stanzas   []SopsStanza `json:"stanzas"`
+	NoPrompt  bool         `json:"no_prompt,omitempty"`
+}
+
+// SopsUnwrapResult carries the per-FILE key. SECURITY: this IS a secret — but a
+// single-file one. It decrypts exactly the file whose stanzas produced it and is useless
+// for any other, which is the entire point of brokering here instead of handing over the
+// identity: a compromised `sops` learns one file's key, not every file's.
+type SopsUnwrapResult struct {
+	FileKey []byte `json:"file_key"`
+}
+
 // ScrubParams is one chunk of a streamed scrub request. The client loops sending
 // chunks via the "scrub" method, then flushes the overlap tail at EOF via
 // "scrub_flush" (Data is empty/unused for flush). After a "scrub"/"scrub_flush"
