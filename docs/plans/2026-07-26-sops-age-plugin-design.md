@@ -103,11 +103,20 @@ that were never encrypted to this key before prompting for presence.
 ### 4. SOPS identities are a first-class concept, stored in the existing vault
 
 `av sops` treats an identity as its own object, with its own commands and its own access
-rules. Storage reuses `secrets.age` under a reserved `sops/` namespace rather than a
-second encrypted file: a sibling file would duplicate the atomic write, the flock, and the
-encryption from `internal/backend/agefile/agefile.go` while differing only in access
-policy. Policy belongs in the command layer, so that is where it goes — `av read` refuses
-names under `sops/`.
+rules. Storage reuses the existing vault (`vault.age`, see `internal/config/paths.go`)
+under a reserved `sops/` namespace rather than a second encrypted file: a sibling file
+would duplicate the atomic write, the flock, and the encryption from
+`internal/backend/agefile/agefile.go` while differing only in access policy. Policy
+belongs in the command layer, so that is where it goes — `av read` refuses names under
+`sops/`.
+
+### 4a. No new dependency
+
+`filippo.io/age/plugin` ships a plugin-authoring framework — `plugin.New`,
+`HandleIdentity`, `Main`, and the `EncodeIdentity`/`ParseIdentity` bech32 helpers — added
+in age v1.3.0. `go.mod` already pins age v1.3.1. The protocol state machine, the stanza
+wire format, and the identity encoding all come from the library, which reduces
+`cmd/age-plugin-av` to an `Unwrap` method that calls the daemon.
 
 ### 5. One presence check per command, not per file
 
@@ -144,7 +153,7 @@ filippo.io/age/plugin  ──exec──▶  age-plugin-av
                                                                │
                                        Session (mlock, presence, TTL)
                                                                │
-                                          secrets.age → sops/<name>
+                                           vault.age → sops/<name>
 ```
 
 `age-plugin-av` implements `identity-v1` only. It holds no state, performs no
