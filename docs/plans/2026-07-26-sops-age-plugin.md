@@ -516,7 +516,9 @@ Order and specifics:
 AGE-PLUGIN-AV-1QQQ…
 ```
 
-`import` must report which file it found before touching it and ask whether to keep a backup, and it must never delete a key silently. Test: an existing `keys.txt` with two keys imports both; a missing file reports every location it checked.
+`import` must report which file it found before touching it and ask whether to keep a backup, and it must never delete a key silently. Test: an existing `keys.txt` with two keys imports both; a missing file reports every location it checked — use `config.SopsKeysFileCandidates()`, which is ordered and already accounts for `SOPS_AGE_KEY_FILE`.
+
+**"Found nothing" is not the same as "you have no key."** Task 3 established that sops reads its identity from four places, and only two are filesystem paths. A user whose key comes from `SOPS_AGE_KEY` (inline key text) or `SOPS_AGE_KEY_CMD` (a command that prints one) has a working setup that a path search cannot see. Reporting a bare "no keys.txt found" to that user is wrong and will send them hunting for a file that was never supposed to exist. When neither env var is set, say which paths were checked; when either *is* set, say so and explain that importing means moving the key into the vault and dropping that variable.
 
 Also detect the `sops` version and warn when it is below 3.10, which is where plugin support landed. An obscure decryption failure later is much worse than a clear warning now.
 
