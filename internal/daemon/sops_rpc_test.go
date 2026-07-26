@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -61,6 +62,15 @@ func (a *sopsAuth) counts() (prompts, unwraps int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.prompts, a.unwraps
+}
+
+// setDeny flips the cancel-the-prompt switch. It exists so no test writes a.deny directly:
+// the daemon reads it from the goroutine serving the connection, so a bare assignment is a
+// data race that -race only reports when the timing cooperates.
+func (a *sopsAuth) setDeny(v bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.deny = v
 }
 
 func (a *sopsAuth) reset() {
@@ -228,6 +238,49 @@ func sopsResult(t *testing.T, resp ipc.Response) ipc.SopsUnwrapResult {
 	return res
 }
 
+// sopsAuditDetails is the CLOSED set of Detail strings the sops path may write — every
+// literal sops_rpc.go passes to sopsAudit, plus the "denied" event's. It is restated here
+// rather than imported on purpose: a new outcome has to be written down twice, which is
+// the moment someone looks at whether it is a literal.
+//
+// SECURITY: this allowlist, not the encoding scan below it, is what makes "the audit log
+// never carries key material" a real assertion. The obvious test — "the raw output must
+// not contain the file key in base64 or hex" — is a BLOCKLIST of encodings, and it misses
+// the formulations a leak is actually written in. `string(fileKey)` and
+// `fmt.Sprintf("%s", fileKey)` slip through because a file key is 16 random bytes, so
+// json.Marshal replaces the invalid UTF-8 with U+FFFD before the needle can match; `%v`
+// renders `[12 34 …]` and `%q` renders `"\x12\x34…"`, neither of which is base64 or hex.
+// A blocklist catches the two encodings someone would have to write deliberately and
+// misses the four they would write by accident. An allowlist catches all six, and every
+// encoding nobody has thought of yet: a Detail built from anything but these literals is
+// not one of them, whatever it is made of.
+var sopsAuditDetails = []string{
+	"ok",                    // sops_unwrap: the file key was returned
+	"no matching stanza",    // sops_unwrap: the identity is ours, the file is not
+	"malformed stanza",      // sops_unwrap: the header is not a header
+	"no presence available", // sops_unwrap: dangerous tier, and the caller set NoPrompt
+	"sops unwrap",           // denied: a dangerous-tier presence check the user cancelled
+}
+
+// assertAuditDetails holds every sops event the fixture logged against that set.
+func assertAuditDetails(t *testing.T, log *bufLogger) {
+	t.Helper()
+	for _, e := range log.all() {
+		if e.Kind != "sops_unwrap" && e.Kind != "denied" {
+			continue
+		}
+		if slices.Contains(sopsAuditDetails, e.Detail) {
+			continue
+		}
+		// SECURITY: the offending Detail is NOT printed. If this assertion is firing, the
+		// most likely reason is that it now carries key material, and a t.Fatalf is a
+		// straight path from there into a CI log. Its length is enough to identify it.
+		t.Fatalf("audit %q entry for %q recorded a Detail of %d bytes that is not one of %v — "+
+			"an outcome outside that set is how key material reaches the log",
+			e.Kind, e.Name, len(e.Detail), sopsAuditDetails)
+	}
+}
+
 // TestSopsUnwrapReturnsTheFileKey: a stored identity unwraps a file encrypted to its own
 // recipient by stock age, and the returned key really decrypts that file.
 //
@@ -293,8 +346,11 @@ func TestSopsUnwrapUnknownRecipientNeverPrompts(t *testing.T) {
 	_, stanzas, _ := sopsFile(t, theirs, "someone else's secret")
 	resp := f.unwrap(t, theirs.Recipient(), stanzas, false)
 
+	// SECURITY: the result is NOT printed here or below. A result on this path means the
+	// daemon handed back a file key it should have refused, and a t.Fatalf is the shortest
+	// route from there into a CI log. Its length says everything the failure needs.
 	if resp.Error == nil {
-		t.Fatalf("unwrap with a recipient we hold no key for succeeded; result=%s", resp.Result)
+		t.Fatalf("unwrap with a recipient we hold no key for succeeded, returning a %d-byte result", len(resp.Result))
 	}
 	if resp.Error.Code != ipc.CodeBadRequest {
 		t.Fatalf("code = %d, want CodeBadRequest (%d)", resp.Error.Code, ipc.CodeBadRequest)
@@ -309,7 +365,7 @@ func TestSopsUnwrapUnknownRecipientNeverPrompts(t *testing.T) {
 		t.Fatalf("a file we hold no key for cost %d prompts + %d unwraps, want 0 + 0", p, u)
 	}
 	if resp.Result != nil {
-		t.Fatalf("a refused unwrap must return no result, got %s", resp.Result)
+		t.Fatalf("a refused unwrap must return no result, got %d bytes", len(resp.Result))
 	}
 	for _, e := range f.log.all() {
 		if e.Kind == "sops_unwrap" {
@@ -479,7 +535,7 @@ func TestSopsUnwrapDangerousTierDeniedIsDenied(t *testing.T) {
 	f := newSopsFixture(t)
 	f.seed(t, "prod", key, sopsplugin.TierDangerous)
 	f.open(t)
-	f.auth.deny = true
+	f.auth.setDeny(true)
 
 	_, stanzas, _ := sopsFile(t, key, "prod file")
 	resp := f.unwrap(t, key.Recipient(), stanzas, false)
@@ -487,8 +543,9 @@ func TestSopsUnwrapDangerousTierDeniedIsDenied(t *testing.T) {
 		t.Fatalf("resp.Error = %+v, want CodeDenied (%d)", resp.Error, ipc.CodeDenied)
 	}
 	if resp.Result != nil {
-		t.Fatalf("a denied unwrap must return no result, got %s", resp.Result)
+		t.Fatalf("a denied unwrap must return no result, got %d bytes", len(resp.Result))
 	}
+	assertAuditDetails(t, f.log)
 }
 
 // TestSopsUnwrapDangerousTierNoPromptIsLocked: NoPrompt reaches the dangerous tier too.
@@ -496,8 +553,16 @@ func TestSopsUnwrapDangerousTierDeniedIsDenied(t *testing.T) {
 // caller that has told us no human is present must not be handed a biometric it cannot
 // answer. Per FILE, a hang here would be thirty hangs.
 //
-// CodeLocked is the honest code: ErrLocked is "authorization not available", which is
-// exactly what a refused-to-ask presence check is. Nothing was denied; nothing was asked.
+// CodeLocked is the honest CODE: it is "authorization not available", which is exactly
+// what a refused-to-ask presence check is, and it gives the agent the same exit-69 pause a
+// locked vault does. Nothing was denied; nothing was asked.
+//
+// The MESSAGE is a separate assertion, and the sharper one. The vault is NOT locked here —
+// the session is open and only the fresh per-file check is missing — so the stock
+// ErrLocked text ("vault locked: authorization not available") would send a human to
+// `av unlock`, a no-op on this path, after which the agent retries and gets the identical
+// error. A loop, and the daemon is the only layer that knows enough to prevent it: two
+// different situations return CodeLocked and nothing downstream can tell them apart.
 func TestSopsUnwrapDangerousTierNoPromptIsLocked(t *testing.T) {
 	key, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -514,6 +579,50 @@ func TestSopsUnwrapDangerousTierNoPromptIsLocked(t *testing.T) {
 	}
 	if p, _ := f.auth.counts(); p != 0 {
 		t.Fatalf("NoPrompt spent %d dangerous-tier prompts, want 0", p)
+	}
+	if strings.Contains(resp.Error.Message, "vault locked") {
+		t.Fatalf("message = %q, but the vault is NOT locked — this text sends a human to `av unlock`, which changes nothing here", resp.Error.Message)
+	}
+	// It must name the two things that would let someone act: which identity, and that the
+	// caller's own no_prompt is the reason nothing was asked.
+	if !strings.Contains(resp.Error.Message, "prod") || !strings.Contains(resp.Error.Message, "no_prompt") {
+		t.Fatalf("message = %q, want it to name the identity and the caller's no_prompt", resp.Error.Message)
+	}
+	assertAuditDetails(t, f.log)
+}
+
+// TestSopsUnwrapDangerousFromLockedCostsTwoChecks pins the one row the tier documentation
+// used to leave out, so nobody rediscovers it from an unexpected second Touch ID.
+//
+// "dangerous costs one check per file" is true, but the FIRST dangerous file on a locked
+// vault costs two: the unwrap that opens the session, then the fresh per-file check. They
+// buy different things — the first a session every later file rides for free, the second
+// the per-file gate the tier exists for — and it is the same two `av run` costs on a
+// dangerous entry from locked. The second file costs one, which is what proves the first
+// check was the session and not a double charge.
+func TestSopsUnwrapDangerousFromLockedCostsTwoChecks(t *testing.T) {
+	key, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newSopsFixture(t)
+	f.seed(t, "prod", key, sopsplugin.TierDangerous)
+	// Deliberately NOT opened: this is the day's first command.
+
+	_, stanzas, want := sopsFile(t, key, "prod file")
+	if res := sopsResult(t, f.unwrap(t, key.Recipient(), stanzas, false)); !bytes.Equal(res.FileKey, want) {
+		t.Fatal("the first dangerous unwrap returned the wrong file key")
+	}
+	if p, u := f.auth.counts(); p != 1 || u != 1 {
+		t.Fatalf("the first dangerous file on a locked vault cost %d prompts + %d unwraps, want 1 + 1 — the session open, then the fresh per-file check", p, u)
+	}
+
+	_, more, want2 := sopsFile(t, key, "second prod file")
+	if res := sopsResult(t, f.unwrap(t, key.Recipient(), more, false)); !bytes.Equal(res.FileKey, want2) {
+		t.Fatal("the second dangerous unwrap returned the wrong file key")
+	}
+	if p, u := f.auth.counts(); p != 2 || u != 1 {
+		t.Fatalf("the second dangerous file brought the total to %d prompts + %d unwraps, want 2 + 1 — one session, one fresh check per file", p, u)
 	}
 }
 
@@ -558,9 +667,11 @@ func TestSopsUnwrapCorruptEntryIsInternalNotUnknown(t *testing.T) {
 // leaves ONE audit entry naming it and saying how it went — and the audit output contains
 // neither the file key nor the private key.
 //
-// The negatives are asserted against a REAL seeded key and the REAL file key the call
-// returned, in every encoding an accidental log line could produce them in, so the
-// assertion fails if someone ever interpolates either into an event.
+// The leak assertion is the Detail ALLOWLIST (see sopsAuditDetails), which holds whatever
+// encoding an accident is written in. The encoding scan below it is a backstop, not the
+// assertion: it is asserted against a REAL seeded key and the REAL file key this call
+// returned, but it can only catch the encodings it names, and the private key is the one
+// that matters there — unlike a file key, it exists as exactly one canonical text.
 func TestSopsUnwrapAuditRecordsNameAndOutcomeOnly(t *testing.T) {
 	key, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -594,21 +705,28 @@ func TestSopsUnwrapAuditRecordsNameAndOutcomeOnly(t *testing.T) {
 	if !named {
 		t.Fatalf("no sops_unwrap audit entry; kinds = %v", got)
 	}
+	// The assertion that actually holds: every outcome is one of a closed set of literals,
+	// so no Detail can carry key material in any encoding.
+	assertAuditDetails(t, f.log)
 
 	raw := f.log.raw(t)
-	// SECURITY: the private key, in the only form it exists as text.
+	// SECURITY: the private key, in the only form it exists as text. This one IS
+	// exhaustive — an age identity has exactly one canonical string.
 	if strings.Contains(raw, key.String()) {
-		t.Fatalf("audit output leaked the private key:\n%s", raw)
+		t.Fatal("audit output leaked the private key")
 	}
-	// SECURITY: the file key, in every encoding a stray log line could render it in —
-	// raw bytes, the base64 JSON would use, and hex.
+	// The file key, in the encodings a scan CAN name: raw bytes, the base64 JSON would
+	// use, and hex. Deliberately a backstop — a file key is 16 random bytes, so the raw
+	// needle never survives json.Marshal's UTF-8 replacement, and `%v`/`%q` would render
+	// it as neither base64 nor hex. Those four cases are the allowlist's job.
 	for enc, s := range map[string]string{
 		"raw":    string(res.FileKey),
 		"base64": base64.StdEncoding.EncodeToString(res.FileKey),
 		"hex":    hex.EncodeToString(res.FileKey),
 	} {
 		if strings.Contains(raw, s) {
-			t.Fatalf("audit output leaked the file key (%s):\n%s", enc, raw)
+			// SECURITY: raw holds the leak. Naming the encoding is enough to find it.
+			t.Fatalf("audit output leaked the file key (%s)", enc)
 		}
 	}
 }
@@ -638,7 +756,7 @@ func TestSopsUnwrapErrorsCarryNoKeyMaterial(t *testing.T) {
 
 	for _, resp := range []ipc.Response{unknown, mismatch} {
 		if resp.Error == nil {
-			t.Fatalf("expected an error; got result=%s", resp.Result)
+			t.Fatalf("expected an error; got a %d-byte result", len(resp.Result))
 		}
 		if strings.Contains(resp.Error.Message, mine.String()) || strings.Contains(resp.Error.Message, theirs.String()) {
 			t.Fatalf("error leaked a private key: %q", resp.Error.Message)
@@ -650,4 +768,41 @@ func TestSopsUnwrapErrorsCarryNoKeyMaterial(t *testing.T) {
 	if !strings.Contains(mismatch.Error.Message, "mykey") {
 		t.Fatalf("message = %q, want it to name the identity that could not unwrap", mismatch.Error.Message)
 	}
+	assertAuditDetails(t, f.log)
+}
+
+// TestSopsUnwrapMalformedStanzaIsBadRequestNotInternal: a header that will not parse is
+// the CALLER's fault and must say so.
+//
+// The distinction is worth a test because the easy implementation gets it backwards.
+// age reports "no stanza matched this key" and "this is not a stanza" as different errors,
+// and only the first is ErrIncorrectIdentity — so mapping "everything else" to
+// CodeInternal tells a user with a truncated SOPS header that the daemon broke, and hands
+// any client a way to mint an internal error on demand. Both are CodeBadRequest; the
+// message, not the code, is what separates them.
+func TestSopsUnwrapMalformedStanzaIsBadRequestNotInternal(t *testing.T) {
+	key, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newSopsFixture(t)
+	f.seed(t, "mykey", key, sopsplugin.TierNormal)
+	f.open(t)
+
+	// A real stanza with its recipient arg cut in half — what a truncated header looks
+	// like. It is not "encrypted to someone else"; it does not decode at all.
+	_, stanzas, _ := sopsFile(t, key, "payload")
+	stanzas[0].Args[0] = stanzas[0].Args[0][:len(stanzas[0].Args[0])/2]
+
+	resp := f.unwrap(t, key.Recipient(), stanzas, false)
+	if resp.Error == nil || resp.Error.Code != ipc.CodeBadRequest {
+		t.Fatalf("resp.Error = %+v, want CodeBadRequest (%d) — a header the caller sent is the caller's fault", resp.Error, ipc.CodeBadRequest)
+	}
+	if !strings.Contains(resp.Error.Message, "malformed") {
+		t.Fatalf("message = %q, want it to say the stanzas are malformed rather than blame the key", resp.Error.Message)
+	}
+	if strings.Contains(resp.Error.Message, key.String()) {
+		t.Fatalf("error leaked a private key: %q", resp.Error.Message)
+	}
+	assertAuditDetails(t, f.log)
 }

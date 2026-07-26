@@ -110,22 +110,35 @@ func (s *Server) sopsUnwrap(req ipc.Request) ipc.Response {
 	// appears in a tool's output.
 	fileKey, err := id.Key.Unwrap(stanzas)
 	if err != nil {
-		code, detail := ipc.CodeInternal, "unwrap failed"
+		// BOTH outcomes below are CodeBadRequest, because both are the CALLER's fault.
+		// id.Key was parsed out of the store before this line, so the only input that
+		// varies here is p.Stanzas: age refuses because the header it was handed does not
+		// fit the key, never because the daemon is broken. Reporting a truncated SOPS
+		// header as CodeInternal ("the daemon broke") sends a user looking in the wrong
+		// place, and it lets any client mint an internal error at will. CodeInternal on
+		// this RPC stays for the genuine daemon faults ABOVE — an unregistered vault, a
+		// store entry that will not decode — which no request can provoke.
+		//
+		// The MESSAGE still tells the two apart, because they send a user somewhere
+		// different. The default: the stored key matched the recipient we were ASKED for,
+		// but no stanza in this file was encrypted to it — a keys.txt pointing at the wrong
+		// one of two keys, or stanzas from another file. The file stays unreadable.
+		//
 		// SECURITY: id.Name, never id — Identity.String() exists to stop %v from rendering
 		// the private key, and reaching past it is exactly the mistake it prevents.
-		msg := fmt.Sprintf("sops unwrap %q: the file key could not be unwrapped", id.Name)
-		if errors.Is(err, age.ErrIncorrectIdentity) {
-			// The stored key matched the recipient we were ASKED for, but no stanza in
-			// this file was encrypted to it — a keys.txt pointing at the wrong one of two
-			// keys, or stanzas from another file. A client fault, and the file simply
-			// stays unreadable.
-			code, detail = ipc.CodeBadRequest, "no matching stanza"
-			msg = fmt.Sprintf("sops unwrap %q: no stanza in this file was encrypted to it", id.Name)
+		detail := "no matching stanza"
+		msg := fmt.Sprintf("sops unwrap %q: no stanza in this file was encrypted to it", id.Name)
+		if !errors.Is(err, age.ErrIncorrectIdentity) {
+			// Not "the wrong key" but "not a stanza": an arg that is not base64, a
+			// recipient block of the wrong length, a body that cannot hold a file key
+			// (age's x25519.go:166-192). A truncated header reads exactly like this.
+			detail = "malformed stanza"
+			msg = fmt.Sprintf("sops unwrap %q: the file's header stanzas are malformed", id.Name)
 		}
 		s.sopsAudit(id, detail)
 		// SECURITY: age's error is NOT wrapped. Its text is secret-free today, but the
 		// file key is live in this frame and an error string is the easiest way out.
-		return errResp(req.ID, code, msg)
+		return errResp(req.ID, ipc.CodeBadRequest, msg)
 	}
 	s.sopsAudit(id, "ok")
 	res, _ := json.Marshal(ipc.SopsUnwrapResult{FileKey: fileKey})
@@ -166,6 +179,14 @@ func (s *Server) sopsFindError(reqID uint64, r *age.X25519Recipient, err error) 
 // makes `helm secrets template` over thirty files bearable. dangerous demands a FRESH
 // check per call — slow on purpose, so a production deploy is hard to perform
 // absent-mindedly.
+//
+// The row that is easy to miss when reading "one check per file": the FIRST dangerous file
+// met while the vault is LOCKED costs TWO — the unwrap that opens the session (step 3),
+// then this one. They are not the same check charged twice. The first buys a session that
+// every later file rides for free; the second is the per-file one this tier is for, and
+// skipping it because a session happens to be fresh would mean the first dangerous file of
+// the day is the one that never prompts. It matches `av run` on a dangerous entry from a
+// locked vault, which costs the same two.
 func (s *Server) sopsTierGate(reqID uint64, id sopsplugin.Identity, noPrompt bool) *ipc.Response {
 	if id.Tier != sopsplugin.TierDangerous {
 		return nil
@@ -175,11 +196,19 @@ func (s *Server) sopsTierGate(reqID uint64, id sopsplugin.Identity, noPrompt boo
 		// This is a NARROW divergence from resolver.Resolve, which prompts for a dangerous
 		// entry regardless of NoPrompt: resolve runs once per command, this runs once per
 		// FILE, so carrying that policy over would hang an agent thirty times instead of
-		// once. ErrLocked ("authorization not available") is the honest sentinel — nothing
-		// was denied, because nothing was asked — and it hands the agent the same clean
-		// exit-69 pause a locked vault does.
+		// once. CodeLocked is the honest code — nothing was denied, because nothing was
+		// asked — and it hands the agent the same clean exit-69 pause a locked vault does.
 		s.sopsAudit(id, "no presence available")
-		r := errResp(reqID, ipc.CodeLocked, ErrLocked.Error())
+		// The MESSAGE, however, is deliberately not ErrLocked's "vault locked". The vault
+		// is not locked here: the session is open (step 3 saw to that) and only the fresh
+		// per-file check is missing. "vault locked" would send a human to `av unlock`,
+		// which changes nothing on this path, and the agent's retry would fail identically
+		// — a loop. So it names what is actually missing. age-plugin-av must relay this
+		// text rather than substitute one of its own (Task 8), because it is the last layer
+		// that can still tell the two CodeLocked situations apart.
+		r := errResp(reqID, ipc.CodeLocked, fmt.Sprintf(
+			"sops unwrap %q: dangerous-tier identity needs a fresh presence check, and this caller set no_prompt",
+			id.Name))
 		return &r
 	}
 	if s.presence == nil {
@@ -203,6 +232,11 @@ func (s *Server) sopsTierGate(reqID uint64, id sopsplugin.Identity, noPrompt boo
 // SECURITY (structural): audit.Event has no value field, so nothing here CAN carry key
 // material — but the arguments still matter. It takes the whole Identity and reads only
 // Name and Tier from it, so every call site is spared the chance to pass id.Key.
+//
+// outcome is drawn from a CLOSED set of literals, and sopsAuditDetails in sops_rpc_test.go
+// restates it: a new outcome must be added there too, deliberately. That allowlist is the
+// leak assertion — a Detail built from anything but a literal is caught by it whatever
+// encoding the accident used, which no test for base64 or hex can promise.
 func (s *Server) sopsAudit(id sopsplugin.Identity, outcome string) {
 	s.audit.Log(audit.Event{Kind: "sops_unwrap", Name: id.Name, Tier: string(id.Tier), Detail: outcome})
 }

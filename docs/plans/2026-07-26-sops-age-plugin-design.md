@@ -127,6 +127,13 @@ separate decryption. Touch ID on every file would make the feature unusable.
   command runs inside the open session. One touch per `helm upgrade`.
 - **Per-identity `--tier dangerous`:** presence on every file. Slow on purpose — a
   production deploy should be hard to perform absent-mindedly.
+- **The first dangerous file on a *locked* vault costs TWO checks**, not one: the unwrap
+  that opens the session, then the fresh per-file check. They buy different things — the
+  first a session every later file rides for free, the second the per-file gate the tier
+  exists for — and skipping the second because the session happens to be new would mean
+  the first dangerous file of the day is the one that never prompts. It matches what
+  `av run` on a dangerous entry from a locked vault already costs. Written down because
+  "one check per file" reads like a promise of exactly one.
 - Audit comes free from `internal/audit`. Each unwrap that reached an identity logs its
   name, tier, and outcome — never a value. An unknown recipient logs nothing: there is no
   identity to name, and one line per foreign file would drown the log exactly where it
@@ -149,6 +156,13 @@ so a locked vault would otherwise surface as an opaque "failed to decrypt". The 
 protocol carries a `msg` command for exactly this. Under `AV_NO_PROMPT=1` the plugin skips
 the presence request and returns `AgentVault: vault locked — ask a human to run
 av unlock`, matching the exit-69 behavior of every other command.
+
+**Amended by Task 6's review: the plugin RELAYS the daemon's message rather than hard-coding
+that one.** `CodeLocked` turned out to cover two situations — a locked session, and a
+dangerous-tier identity whose fresh per-file check was skipped under `no_prompt`, where the
+session is open and `av unlock` changes nothing. A fixed "run `av unlock`" makes the second
+a loop, and the plugin is the last layer that could have told them apart. The text above
+remains what the daemon sends for a genuinely locked session.
 
 ## Architecture
 

@@ -39,7 +39,9 @@ func sopsLockedServer(t *testing.T, vaultPath string, id age.Identity) string {
 		t.Fatal(err)
 	}
 	reg := backend.NewRegistry()
-	reg.Register("file", agefile.New(agefile.Static{ID: id}, vaultPath))
+	// The SAME constant the guard keys on — a "file" literal here would let this test pass
+	// over a backend the guard does not protect.
+	reg.Register(sopsplugin.VaultBackendID, agefile.New(agefile.Static{ID: id}, vaultPath))
 	srv.SetResolver(NewResolver(reg, NewStubPresence(), NewSession(15*time.Minute)))
 	go srv.Serve()
 	t.Cleanup(func() { srv.Close() })

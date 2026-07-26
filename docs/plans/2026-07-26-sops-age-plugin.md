@@ -505,13 +505,16 @@ func main() {
 }
 ```
 
-**Step 4: Handle the locked-vault message.** SOPS collects identity-loading errors and reports them only if decryption fails outright, so a bare error surfaces as an opaque "failed to decrypt". Return an error whose text is self-explanatory in that context:
+**Step 4: Relay the daemon's `CodeLocked` message — do not substitute one.** SOPS collects identity-loading errors and reports them only if decryption fails outright, so a bare error surfaces as an opaque "failed to decrypt". The plugin must therefore surface text that is self-explanatory in that context — but it must be **the `rpc.Message` the daemon sent**, prefixed with `AgentVault: `, *not* decision 6's hard-coded `vault locked — ask a human to run av unlock`:
 
-```
-AgentVault: vault locked — ask a human to run `av unlock`
+```go
+// CodeLocked, message relayed verbatim.
+AgentVault: <rpc.Message>
 ```
 
-Under `AV_NO_PROMPT=1` (see `noPrompt()` at `cmd/av/main.go:387`) the plugin must return this immediately rather than block. Add a test asserting the message reaches the caller and that the process exits rather than hanging.
+**Why (this was a Task 6 review finding).** `CodeLocked` covers two different situations and only the daemon can tell them apart: a genuinely locked session, and a *dangerous-tier identity whose fresh per-file presence check was skipped because the caller set `no_prompt`* — where the session is open and `av unlock` is a no-op, so a hard-coded "run `av unlock`" sends the human in a circle and the agent's retry returns the identical error. `sopsTierGate` (`internal/daemon/sops_rpc.go`) already names what is actually missing; the plugin is the last layer that can pass it on, because `cmd/av/main.go:402` renders `CodeLocked` from its own string and never sees this path.
+
+Under `AV_NO_PROMPT=1` (see `noPrompt()` at `cmd/av/main.go:387`) the plugin must return immediately rather than block. Add a test asserting the daemon's message reaches the caller — assert against the *dangerous-tier* message specifically, since that is the one a substituted string would swallow — and that the process exits rather than hanging.
 
 **Step 5: Run, confirm pass. Step 6: Commit**
 
