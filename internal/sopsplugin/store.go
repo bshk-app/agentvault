@@ -21,6 +21,23 @@ import (
 // the way an ordinary secret can, so the two must not drift.
 const Namespace = "sops/"
 
+// VaultBackendID names the backend a Store lives in: the local age file vault, registered
+// under this id in the daemon's backend registry.
+//
+// It is exported so that ONE identifier names the backend everywhere. The daemon refuses
+// Namespace on resolve/add/rm for THIS backend only — deliberately, because enforcement
+// should be exactly as wide as the thing it protects: av://1p/sops/prod/key addresses a
+// 1Password vault called "sops" and can hold no AgentVault identity, so refusing it would
+// deny a user for nothing. That scoping is only safe while the guard and the Store agree
+// on which backend that is.
+//
+// So the daemon builds its Store from the registry under THIS constant rather than a
+// literal. Without it the two are coupled by nothing but a comment in another package,
+// and the day someone writes NewStore(keychainBE, …) the guard silently stops covering
+// the namespace it exists for — with `av read keychain/sops/x` printing an age private
+// key and no test failing.
+const VaultBackendID = "file"
+
 // Tier says how often an identity has to prove presence. `normal` spends one presence
 // check per command, so a `helm secrets template` over thirty files costs one touch;
 // `dangerous` spends one PER FILE, which is deliberately slow — a production deploy should

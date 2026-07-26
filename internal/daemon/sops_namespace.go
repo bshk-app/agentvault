@@ -25,18 +25,17 @@ import (
 // The only writer permitted in here is the av sops RPC surface, which owns the envelope
 // format the Store reads back.
 
-// sopsNamespaceBackend is the backend id whose vault holds the namespace: the local age
-// file vault, the only store sopsplugin.Store reads and writes.
-//
-// The guard is scoped to it ON PURPOSE, because enforcement should be exactly as wide as
-// the thing it protects. Every other backend has its own name space with its own
-// meaning: av://1p/sops/prod/key addresses a 1Password VAULT called "sops", and
+// The guard is scoped to ONE backend — sopsplugin.VaultBackendID, the local age file
+// vault — on purpose, because enforcement should be exactly as wide as the thing it
+// protects. Every other backend has its own name space with its own meaning:
+// av://1p/sops/prod/key addresses a 1Password VAULT called "sops", and
 // av://keychain/sops/… a keychain service of that name. Neither can hold an AgentVault
 // identity, so refusing them would deny a user for nothing.
 //
-// IF sopsplugin.Store is ever constructed over a different backend, this constant must
-// follow it — otherwise the guard silently stops covering the namespace it exists for.
-const sopsNamespaceBackend = "file"
+// That scoping is only safe while the guard and the Store agree on WHICH backend that
+// is, so both name it with the same constant rather than a "file" literal — the guard
+// here, the Store construction in sops_rpc.go. There is deliberately no local alias: a
+// second name for it in this package is the first step back to two that can diverge.
 
 // sopsNamespaceError reports a locator that addresses the reserved SOPS namespace,
 // returning nil for everything else.
@@ -56,7 +55,7 @@ const sopsNamespaceBackend = "file"
 // SECURITY: the message names the locator — a name the caller already typed — and
 // nothing else. It never sees a value, and must never be given one.
 func sopsNamespaceError(backendID, locator string) error {
-	if backendID != sopsNamespaceBackend || !strings.HasPrefix(locator, sopsplugin.Namespace) {
+	if backendID != sopsplugin.VaultBackendID || !strings.HasPrefix(locator, sopsplugin.Namespace) {
 		return nil
 	}
 	return fmt.Errorf("%q is in the reserved %s namespace — use av sops to manage SOPS identities",
