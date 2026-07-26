@@ -350,11 +350,17 @@ Two reasons, and the second is the one that matters:
 
 **The same conclusion applies to all of Task 9.** Every `av sops` subcommand is an RPC, exactly like `av setup` — whose comment at `cmd/av/main.go:608` states the pattern outright: *"It is a PURE RPC: it asks the daemon (which links age+enclave) to provision the local age store … av stays thin: no age/enclave/provision import lives here."* Key generation, import, and listing all happen daemon-side. `av` never imports `sopsplugin` and never handles an age value.
 
-**Files:**
-- Modify: `internal/daemon/server.go` (the `resolve` path and the `read` route into it), plus its test.
-- Do **not** modify `cmd/av/main.go` for enforcement. A friendlier message there is fine, but it must not be the only thing standing between a caller and the key.
+**Block writes too, not only reads. The original title of this task named the wrong half.**
 
-**Step 1:** Test at the daemon level that resolving `av://file/sops/mykey` is refused with `CodeBadRequest` and a message naming `av sops`, carrying no value. Then test that `av read sops/mykey` surfaces it as `exitBadRequest`.
+Task 4's review demonstrated why: `av add sops/notes` is validated nowhere — not in `parseNameArgs` (`cmd/av/main.go:812`), not in the daemon's `add` case (`server.go:527`) — so any caller can drop arbitrary text into the namespace. With a junk entry beside a healthy key, `FindByRecipient` failed for a file the healthy key could have decrypted, while `av sops recipient` kept printing happily. Task 4 hardened the store to tolerate that, which is the right fix at that layer, but a namespace anyone can write into is not a namespace. Close the door here.
+
+So the daemon must refuse `sops/…` on **`resolve`, `add`, and `rm`** alike. The only writer permitted into the namespace is the `av sops` RPC surface, which owns the envelope format.
+
+**Files:**
+- Modify: `internal/daemon/server.go` — the `resolve`, `add`, and `rm` cases, plus tests.
+- Do **not** modify `cmd/av/main.go` for enforcement. A friendlier early message there is fine, but it must never be the only thing between a caller and the key.
+
+**Step 1:** Test at the daemon level that `resolve`, `add`, and `rm` each refuse a `sops/…` locator with `CodeBadRequest` and a message naming `av sops`, carrying no value. Include the boundary cases: the bare name `sops`, a name merely starting with `sops` (`sopsucker` must be allowed), and mixed case if locators are case-sensitive. Then test that `av read sops/mykey` surfaces it as `exitBadRequest`.
 **Step 2:** Run, confirm failure. **Step 3:** Implement. **Step 4:** Run, confirm pass.
 
 **Step 5: Commit**
