@@ -27,6 +27,10 @@ func keysUnder(dir string) string { return filepath.Join(dir, "sops", "age", "ke
 func setSopsEnv(t *testing.T, xdg string, xdgSet bool, keyFile string) {
 	t.Helper()
 	t.Setenv("HOME", testHome)
+	// os.UserHomeDir reads USERPROFILE on Windows, not HOME. This file has no build tag
+	// (unlike paths_test.go), so it compiles and runs on a Windows host, where leaving
+	// USERPROFILE alone would resolve every fallback against the real user's home.
+	t.Setenv("USERPROFILE", testHome)
 	t.Setenv("APPDATA", testAppData)
 	// t.Setenv runs first even when the goal is to unset — it is what registers the
 	// restore at cleanup; os.Unsetenv alone would leak into the next test.
@@ -45,32 +49,42 @@ func setSopsEnv(t *testing.T, xdg string, xdgSet bool, keyFile string) {
 // `av sops import` would write its pointer to a file sops never reads, and the user
 // would see only "no identity matched" with nothing to point them at the cause.
 //
-// The windows row runs on any host. filepath.Join uses the host separator, so the
+// The windows rows run on any host. filepath.Join uses the host separator, so the
 // assertion is about which directory is chosen — separators are filepath's problem,
 // and `make cross-test` compiles this for windows.
 func TestSopsKeysFilePath(t *testing.T) {
 	cases := []struct {
-		name   string
-		goos   string
-		xdg    string
-		xdgSet bool
-		want   string
+		name         string
+		goos         string
+		xdg          string
+		xdgSet       bool
+		appDataUnset bool
+		want         string
 	}{
-		{"linux honours XDG_CONFIG_HOME", "linux", testXDG, true, keysUnder(testXDG)},
-		{"linux falls back to ~/.config", "linux", "", false, keysUnder(filepath.Join(testHome, ".config"))},
-		{"linux treats an empty XDG_CONFIG_HOME as unset", "linux", "", true, keysUnder(filepath.Join(testHome, ".config"))},
-		{"darwin honours XDG_CONFIG_HOME", "darwin", testXDG, true, keysUnder(testXDG)},
+		{"linux honours XDG_CONFIG_HOME", "linux", testXDG, true, false, keysUnder(testXDG)},
+		{"linux falls back to ~/.config", "linux", "", false, false, keysUnder(filepath.Join(testHome, ".config"))},
+		{"linux treats an empty XDG_CONFIG_HOME as unset", "linux", "", true, false, keysUnder(filepath.Join(testHome, ".config"))},
+		{"darwin honours XDG_CONFIG_HOME", "darwin", testXDG, true, false, keysUnder(testXDG)},
 		// The non-obvious row: os.UserConfigDir on macOS is ~/Library/Application
 		// Support, not ~/.config, and sops joins keys.txt onto that.
-		{"darwin falls back to Application Support", "darwin", "", false, keysUnder(filepath.Join(testHome, "Library", "Application Support"))},
-		{"darwin treats an empty XDG_CONFIG_HOME as unset", "darwin", "", true, keysUnder(filepath.Join(testHome, "Library", "Application Support"))},
+		{"darwin falls back to Application Support", "darwin", "", false, false, keysUnder(filepath.Join(testHome, "Library", "Application Support"))},
+		{"darwin treats an empty XDG_CONFIG_HOME as unset", "darwin", "", true, false, keysUnder(filepath.Join(testHome, "Library", "Application Support"))},
 		// sops checks XDG_CONFIG_HOME explicitly only on darwin, and os.UserConfigDir
 		// ignores it on Windows, so %AppData% wins even with XDG_CONFIG_HOME set.
-		{"windows ignores XDG_CONFIG_HOME", "windows", testXDG, true, keysUnder(testAppData)},
+		{"windows ignores XDG_CONFIG_HOME", "windows", testXDG, true, false, keysUnder(testAppData)},
+		// os.UserConfigDir errors out when %AppData% is empty rather than falling back,
+		// so this branch has no upstream counterpart to mirror — the answer is ours, and
+		// being ours is exactly why it needs pinning.
+		{"windows without APPDATA falls back under the profile", "windows", "", false, true, keysUnder(filepath.Join(testHome, "AppData", "Roaming"))},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			setSopsEnv(t, c.xdg, c.xdgSet, "")
+			if c.appDataUnset {
+				// setSopsEnv's t.Setenv already registered the restore; this only has
+				// to clear the value for the duration of the subtest.
+				os.Unsetenv("APPDATA")
+			}
 			if got := sopsKeysFilePath(c.goos); got != c.want {
 				t.Fatalf("sopsKeysFilePath(%q) = %q, want %q", c.goos, got, c.want)
 			}

@@ -44,10 +44,20 @@ func sopsKeysFileCandidates(goos string) []string {
 func sopsKeysFileIn(dir string) string { return filepath.Join(dir, "sops", "age", "keys.txt") }
 
 // sopsConfigDirs lists the directories a keys.txt may live in, most-preferred first.
-// Element 0 is the one sops actually resolves, mirroring getUserConfigDir in
-// sops/age/keysource.go: sops consults XDG_CONFIG_HOME explicitly *only* on darwin,
-// because Go's os.UserConfigDir already honours it on other unixes but returns
-// ~/Library/Application Support on macOS and ignores it entirely on Windows.
+// Element 0 is what sops resolves *when sops can resolve anything at all*, mirroring
+// getUserConfigDir in sops/age/keysource.go: sops consults XDG_CONFIG_HOME explicitly
+// *only* on darwin, because Go's os.UserConfigDir already honours it on other unixes but
+// returns ~/Library/Application Support on macOS and ignores it entirely on Windows.
+//
+// Where sops can resolve nothing, this still names a path. os.UserConfigDir returns
+// ("", error) for a relative XDG_CONFIG_HOME on unix, for an empty %AppData% on Windows,
+// and for an unset HOME; sops's `else if userConfigDir != ""` is then false and it opens
+// no keys.txt at all, while element 0 here answers confidently. The divergence is
+// deliberate: in each of those cases the user's sops is already broken independently of
+// AgentVault, and naming the path they would have to fix beats naming none. darwin with
+// XDG_CONFIG_HOME set is *not* one of them — sops returns that value raw, without
+// os.UserConfigDir's absoluteness check, so passing it through verbatim is exact
+// behaviour-matching rather than a shortcut.
 //
 // goos is a parameter rather than a read of runtime.GOOS so that every platform's branch
 // stays reachable from a test on any host; the exported wrappers supply the real one.
