@@ -47,6 +47,17 @@ type Identity struct {
 	Key  *age.X25519Identity
 }
 
+// String keeps the private key out of fmt. age.X25519Identity.String() IS the
+// AGE-SECRET-KEY-1… text, and fmt applies Stringer to struct fields — so without a String
+// method here, a line as ordinary as fmt.Errorf("sops unwrap %v: %w", id, err) would put a
+// private key into an error string, and from there into the audit log or a crash dump.
+// Defining it on Identity suppresses %v, %+v and %s at once, which is the only way to cover
+// call sites this package will never see. Only %#v bypasses a Stringer, and it renders Key
+// as a pointer address rather than a key.
+func (i Identity) String() string {
+	return fmt.Sprintf("sops identity %q (tier %s)", i.Name, i.Tier)
+}
+
 // Info is an identity WITHOUT its private key — the view `av sops ls` prints. It carries
 // the recipient, which is public by construction, and deliberately has no field that could
 // hold key material. Adding one would defeat the namespace.

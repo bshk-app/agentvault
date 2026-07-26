@@ -204,6 +204,53 @@ func TestListNeverReturnsAPrivateKey(t *testing.T) {
 	}
 }
 
+// TestIdentityNeverRendersItsPrivateKey is TestListNeverReturnsAPrivateKey's assertion
+// pointed at the type that actually carries a key. Info cannot leak — it has no key field —
+// while Identity is the struct that reaches the daemon and the audit log, so this is the
+// one that had to be guarded.
+//
+// The leak it closes is not hypothetical: age.X25519Identity.String() IS the
+// AGE-SECRET-KEY-1… text, and fmt applies Stringer to struct fields, so before Identity had
+// a String method of its own, `fmt.Errorf("sops unwrap %v: %w", id, err)` — a line Task 6
+// would write without a second thought — put a private key into an error string. Nothing in
+// internal/daemon calls recover(), so that string reaches a crash dump too. Every verb a
+// caller might reach for is checked, plus the containers fmt recurses into.
+func TestIdentityNeverRendersItsPrivateKey(t *testing.T) {
+	s, _ := newTestStore(t)
+	key := genKey(t)
+	if err := s.Put("work", key, sopsplugin.TierDangerous); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Get("work")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct{ what, rendered string }{
+		{"%v", fmt.Sprintf("%v", id)},
+		{"%+v", fmt.Sprintf("%+v", id)},
+		{"%s", fmt.Sprintf("%s", id)},
+		{"pointer", fmt.Sprintf("%v", &id)},
+		{"inside a slice", fmt.Sprintf("%+v", []sopsplugin.Identity{id})},
+		{"wrapped in an error", fmt.Errorf("sops unwrap %v: %w", id, errors.New("boom")).Error()},
+	} {
+		if strings.Contains(tc.rendered, "AGE-SECRET-KEY") || strings.Contains(tc.rendered, key.String()) {
+			t.Errorf("SECURITY: %s rendered the private key", tc.what)
+		}
+		// The rendering also has to stay useful. If it said nothing, callers would reach
+		// past it for the fields and print those instead, and the guard would buy nothing.
+		if !strings.Contains(tc.rendered, "work") {
+			t.Errorf("%s = %q, want it to name the identity", tc.what, tc.rendered)
+		}
+	}
+
+	// %#v is the one verb a Stringer cannot intercept. It is checked rather than assumed:
+	// the fix is only complete because Go renders the key as a pointer address there.
+	if got := fmt.Sprintf("%#v", id); strings.Contains(got, "AGE-SECRET-KEY") || strings.Contains(got, key.String()) {
+		t.Errorf("SECURITY: %%#v rendered the private key: %s", got)
+	}
+}
+
 // TestListIsSorted: `av sops ls` reads this directly, and the vault is a map, so without
 // an explicit sort the same vault prints in a different order on every invocation.
 func TestListIsSorted(t *testing.T) {
