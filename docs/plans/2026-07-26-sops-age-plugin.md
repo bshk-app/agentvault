@@ -23,6 +23,7 @@
 | `internal/client/client.go` | The `av`-side client. One method per RPC, all shaped like `Add` at line 285. |
 | `cmd/av/main.go:49` | The `switch os.Args[1]` command table. |
 | `internal/config/paths.go` | Platform paths. Has `//go:build !windows`; `paths_windows.go` is the sibling. |
+| `internal/config/sops.go` | Where *sops* keeps its `keys.txt`, under sops's rules — deliberately separate from AgentVault's own paths above. |
 | `internal/backend/agefile/agefile.go` | The vault: `Resolve`, `Add`, `Remove`, `List`. |
 
 **Error codes.** `internal/ipc/proto.go`: `CodeInternal=1`, `CodeBadRequest=2`, `CodeLocked=3`, `CodeDenied=4`, `CodeUnauthorized=5`, `CodeRateLimited=6`. `cmd/av/main.go`: `exitGeneric=1`, `exitBadRequest=2`, `exitLocked=69`, `exitDenied=77`.
@@ -278,9 +279,9 @@ git commit -m "feat(sops): encode AGE-PLUGIN-AV identity pointers"
 SOPS looks in a different place on each platform, and macOS is not the obvious one — it prefers `XDG_CONFIG_HOME` and falls back to `~/Library/Application Support`, not `~/.config`.
 
 **Files:**
-- Modify: `internal/config/paths.go` (note the `//go:build !windows` tag)
-- Modify: `internal/config/paths_windows.go`
-- Modify: `internal/config/paths_test.go`, `internal/config/paths_windows_test.go`
+- Create: `internal/config/sops.go`, `internal/config/sops_test.go`
+
+New files rather than the build-tagged `paths.go` / `paths_windows.go` pair: sops expresses this same split with a runtime `runtime.GOOS == "darwin"` check rather than build tags, so mirroring that keeps the correspondence to `sops/age/keysource.go` auditable in one place, and taking `goos` as a parameter lets every platform's row execute on every host instead of only the one it was compiled for.
 
 **Step 1: Write the failing tests** — table-driven, driving `HOME` and `XDG_CONFIG_HOME` with `t.Setenv`:
 
@@ -507,7 +508,7 @@ Order and specifics:
 2. **`ls`** — names, recipients, tiers. Test that no private key appears in the output.
 3. **`recipient`** / **`identity`** — one-line printers.
 4. **`rm`** — **guarded.** Deleting the only copy of a key that files are encrypted to destroys those files permanently. Require an interactive confirmation; refuse outright when stdin is not a TTY unless `--force` is passed. Test both paths.
-5. **`import`** — the most involved. Read the key from `config.SopsKeysFilePath()` or `--from`, store it, then rewrite `keys.txt` with the pointer:
+5. **`import`** — the most involved. Read the key from `--from`, or from the first `config.SopsKeysFileCandidates()` entry that exists; store it; then rewrite **that same file** with the pointer:
 
 ```
 # managed by AgentVault — this is a pointer, not a key.
@@ -517,6 +518,8 @@ AGE-PLUGIN-AV-1QQQ…
 ```
 
 `import` must report which file it found before touching it and ask whether to keep a backup, and it must never delete a key silently. Test: an existing `keys.txt` with two keys imports both; a missing file reports every location it checked — use `config.SopsKeysFileCandidates()`, which is ordered and already accounts for `SOPS_AGE_KEY_FILE`.
+
+**Rewrite the file you actually read the key from. Never `config.SopsKeysFilePath()` blindly.** `SOPS_AGE_KEY_FILE` is *additive, not an override*: sops opens it **and** the user-config-dir file, as two independent readers. So take a user with `SOPS_AGE_KEY_FILE=~/mykeys.txt`. `import` finds their key there — correctly, it is candidate 0 — but if it then writes the pointer to `SopsKeysFilePath()`, the pointer lands in the config-dir file and `~/mykeys.txt` is left untouched. sops now reads both: the plaintext key is still sitting on disk, still decrypting every file, the plugin is never once exercised, and the user has been told their key is in the vault when it is not. **That is the whole feature failing silently while reporting success** — and nothing in normal use will reveal it, because everything still decrypts. Carry the path the key came from (`--from`, or whichever candidate matched) through to the rewrite and write to exactly that.
 
 **"Found nothing" is not the same as "you have no key."** Task 3 established that sops reads its identity from four places, and only two are filesystem paths. A user whose key comes from `SOPS_AGE_KEY` (inline key text) or `SOPS_AGE_KEY_CMD` (a command that prints one) has a working setup that a path search cannot see. Reporting a bare "no keys.txt found" to that user is wrong and will send them hunting for a file that was never supposed to exist. When neither env var is set, say which paths were checked; when either *is* set, say so and explain that importing means moving the key into the vault and dropping that variable.
 
