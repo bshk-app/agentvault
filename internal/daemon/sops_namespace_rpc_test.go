@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -192,6 +193,10 @@ func TestRmRPCRefusesSopsNamespace(t *testing.T) {
 //     "SOPS/mykey" is a DIFFERENT entry that no Store call can reach. Refusing it would
 //     invent a case-insensitivity rule the vault does not have.
 func TestSopsNamespaceBoundaries(t *testing.T) {
+	t.Setenv("AV_TEST_AUTH", "allow")
+	// The value every allowed sub-case below writes, named so the read sub-case at the end
+	// can assert it comes back.
+	const allowedValue = "v"
 	vault, id := newAgeVault(t, map[string]string{"A": "1"})
 	path, _ := addrmServer(t, vault, id)
 
@@ -214,7 +219,7 @@ func TestSopsNamespaceBoundaries(t *testing.T) {
 			resp := rpcParams(t, path, "add", ipc.AddParams{
 				Backend: "file",
 				Locator: tc.locator,
-				Value:   []byte("v"),
+				Value:   []byte(allowedValue),
 			})
 			refused := resp.Error != nil && strings.Contains(resp.Error.Message, "av sops")
 			if refused != tc.refused {
@@ -226,6 +231,27 @@ func TestSopsNamespaceBoundaries(t *testing.T) {
 			}
 		})
 	}
+
+	// The table above drives `add`, but the direction that matters for a NOT-refused
+	// locator is the READ path: "allowed" on a write only means the entry can be created,
+	// while on a read it means the guard hands a value back. So pin the case-sensitivity
+	// call where it has consequences. The write sub-case above already stored
+	// "SOPS/mykey"; reading it back closes the loop — a different entry, reachable like
+	// any other secret, rather than one swallowed by a case-insensitivity rule the vault
+	// does not have.
+	t.Run("SOPS/mykey via resolve", func(t *testing.T) {
+		resp := sopsResolve(t, path, "OTHER", "av://file/SOPS/mykey")
+		if resp.Error != nil {
+			t.Fatalf("reading SOPS/mykey was refused: %+v", resp.Error)
+		}
+		var res ipc.ResolveResult
+		if err := json.Unmarshal(resp.Result, &res); err != nil {
+			t.Fatal(err)
+		}
+		if res.Values["OTHER"] != allowedValue {
+			t.Fatalf("value = %q, want %q", res.Values["OTHER"], allowedValue)
+		}
+	})
 }
 
 // TestSopsNamespaceIsScopedToTheLocalVault pins the deliberate LIMIT of the guard: the
@@ -242,9 +268,18 @@ func TestSopsNamespaceIsScopedToTheLocalVault(t *testing.T) {
 
 	resp := sopsResolve(t, path, "OTHER", "av://mock/"+sopsplugin.Namespace+"mykey")
 	// The mock backend has no such entry, so this fails — but it must fail as a plain
-	// not-found, NOT as a namespace refusal.
-	if resp.Error != nil && strings.Contains(resp.Error.Message, "av sops") {
+	// not-found, NOT as a namespace refusal. Asserting only the absence of "av sops" would
+	// pass on ANY outcome, including a resolve that never happened; pinning the backend's
+	// OWN error is what proves the request got past the guard and reached the backend.
+	if resp.Error == nil {
+		t.Fatalf("resolve of an unseeded mock locator succeeded; result=%s", resp.Result)
+	}
+	if strings.Contains(resp.Error.Message, "av sops") {
 		t.Fatalf("a sops/ locator in another backend was refused as the reserved namespace: %q", resp.Error.Message)
+	}
+	if !strings.Contains(resp.Error.Message, backend.ErrNotFound.Error()) {
+		t.Fatalf("message = %q, want the backend's own %q — the request must have REACHED the backend",
+			resp.Error.Message, backend.ErrNotFound)
 	}
 }
 

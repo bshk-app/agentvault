@@ -127,6 +127,16 @@ func (r *Resolver) Resolve(profile string, manifestBytes []byte) (map[string]str
 		// Returning aborts the whole resolve, so a manifest that batches a sops/ ref beside
 		// a healthy one yields NOTHING — no partial result is ever returned (see the doc
 		// comment above), so the refusal cannot be diluted by batching.
+		//
+		// One ordering difference from add/rm, which refuse the namespace before their
+		// unlock gate: dispatch's ensureUnlockedResp (server.go) runs BEFORE the resolve
+		// case reaches this code, so a LOCKED `av read sops/x` spends a presence check and
+		// comes back CodeLocked rather than CodeBadRequest. That is accepted, not
+		// overlooked — moving the guard earlier means parsing the manifest in dispatch
+		// too, and two parsers to keep in agreement is a worse trade than one wasted Touch
+		// ID on a read that fails either way. Nothing leaks: the refusal still lands
+		// before any value is fetched. Do not read add/rm's stronger ordering as covering
+		// this path.
 		if err := sopsNamespaceRefError(e.Ref); err != nil {
 			return nil, fmt.Errorf("%w: entry %q: %v", ErrBadRequest, name, err)
 		}
