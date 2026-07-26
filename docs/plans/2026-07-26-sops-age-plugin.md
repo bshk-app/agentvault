@@ -198,7 +198,11 @@ git commit -m "test: prove an age plugin can unwrap standard X25519 stanzas"
 
 ## Task 2: Identity encoding
 
-`AGE-PLUGIN-AV-1…` encodes the recipient's 32-byte X25519 public key, so `avd` knows which stored key a file wants before prompting for presence.
+`AGE-PLUGIN-AV-1…` names the recipient, so `avd` knows which stored key a file wants before prompting for presence.
+
+**As implemented, the payload is the recipient's bech32 `age1…` text, not raw bytes.** `age.X25519Recipient` in v1.3.1 exports only `ParseX25519Recipient`, `String`, and `Wrap` — there is no byte accessor, and age's bech32 helper is an internal package. Recovering 32 raw bytes would mean reimplementing bech32 or taking a dependency, neither of which is worth ~50 bytes in a string nobody types.
+
+**Consequence for Task 6:** `ipc.SopsUnwrapParams.Recipient` carries ASCII, not a 32-byte point. Compare recipients by `String()`, or parse with `age.ParseX25519Recipient` first — do not assume a fixed-length slice.
 
 **Files:**
 - Create: `internal/sopsplugin/identity.go`
