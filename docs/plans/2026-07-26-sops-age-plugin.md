@@ -324,7 +324,9 @@ Identities live in the existing vault (`vault.age`) under a reserved `sops/` pre
 const namespace = "sops/"
 ```
 
-`FindByRecipient` lists the namespace, parses each stored `AGE-SECRET-KEY-1…`, derives its recipient, and compares. Deriving is cheap and the vault is already decrypted at that point, so no public index is needed.
+`FindByRecipient` lists the namespace, parses each stored `AGE-SECRET-KEY-1…`, derives its recipient, and compares.
+
+**Correcting this plan's earlier claim:** the vault is *not* already decrypted at that point. `backend.Backend` exposes only `Resolve` and `List`, and `agefile.Resolve` re-opens and age-decrypts the whole file on every call, so a scan costs one decrypt per stored identity. The conclusion is unchanged — a person has one or two SOPS keys, and widening the backend interface to serve a single caller is the worse trade — but this is the line that gives if anyone ever stores many identities here.
 
 **Step 4: Run, confirm pass. Step 5: Commit**
 
@@ -339,10 +341,20 @@ git commit -m "feat(sops): store SOPS identities under a reserved vault namespac
 
 The namespace is only meaningful if something enforces it.
 
-**Files:**
-- Modify: `cmd/av/read_test.go`, then `cmd/av/main.go` (`runRead`, line 212) or the daemon resolve path — whichever the existing tests indicate is the enforcement point.
+**Enforce in the daemon, not in `av`. This is settled — do not put the check in `cmd/av`.**
 
-**Step 1:** Test that `av read sops/mykey` exits `exitBadRequest` with a message naming `av sops`, not a value.
+Two reasons, and the second is the one that matters:
+
+1. **A check in `av` is advisory, not enforcement.** `av` is one client of a documented local socket. Anyone who can run `av` can speak that protocol directly and skip a client-side guard entirely. The daemon is the only place where refusing to serve `sops/…` is a fact rather than a convention.
+2. **It preserves an isolation the repo maintains on purpose.** `go list -deps ./cmd/av` links no `filippo.io/age` today, and `internal/backend/agefile`'s package comment says that is deliberate. Importing `sopsplugin` into `cmd/av` just to reach the `Namespace` constant would end it for a string.
+
+**The same conclusion applies to all of Task 9.** Every `av sops` subcommand is an RPC, exactly like `av setup` — whose comment at `cmd/av/main.go:608` states the pattern outright: *"It is a PURE RPC: it asks the daemon (which links age+enclave) to provision the local age store … av stays thin: no age/enclave/provision import lives here."* Key generation, import, and listing all happen daemon-side. `av` never imports `sopsplugin` and never handles an age value.
+
+**Files:**
+- Modify: `internal/daemon/server.go` (the `resolve` path and the `read` route into it), plus its test.
+- Do **not** modify `cmd/av/main.go` for enforcement. A friendlier message there is fine, but it must not be the only thing standing between a caller and the key.
+
+**Step 1:** Test at the daemon level that resolving `av://file/sops/mykey` is refused with `CodeBadRequest` and a message naming `av sops`, carrying no value. Then test that `av read sops/mykey` surfaces it as `exitBadRequest`.
 **Step 2:** Run, confirm failure. **Step 3:** Implement. **Step 4:** Run, confirm pass.
 
 **Step 5: Commit**
