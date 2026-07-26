@@ -204,6 +204,8 @@ git commit -m "test: prove an age plugin can unwrap standard X25519 stanzas"
 
 **Consequence for Task 6:** `ipc.SopsUnwrapParams.Recipient` carries ASCII, not a 32-byte point. Compare recipients by `String()`, or parse with `age.ParseX25519Recipient` first — do not assume a fixed-length slice.
 
+The field is `[]byte`, and Go marshals `[]byte` to **base64** over JSON, so what crosses the wire is base64-of-ASCII and the daemon decodes it back to the `age1…` text. The trap is `bytes.Equal(p.Recipient, someRawKey)`: it compares bech32 text against raw bytes and silently never matches. Compare on `String()` or on parsed recipients.
+
 **Files:**
 - Create: `internal/sopsplugin/identity.go`
 - Create: `internal/sopsplugin/identity_test.go`

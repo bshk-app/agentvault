@@ -61,6 +61,12 @@ func TestDecodeIdentityRejectsOtherPlugins(t *testing.T) {
 // keys.txt actually produces. Every one must return an error rather than panic: this
 // parses attacker-influenceable text (a repo's checked-in dotfiles) in a process that
 // later talks to the daemon.
+//
+// Every case also asserts the error does not quote its input back. keys.txt is where
+// private keys live, so anything DecodeIdentity says about a line it rejected can end
+// up in a log or a CI transcript. The assertion is on the whole table, not just the
+// secret-key case, because the leak would arrive as an innocuous-looking %w on some
+// future error path — the sort of change nothing else here would catch.
 func TestDecodeIdentityRejectsGarbage(t *testing.T) {
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -71,13 +77,18 @@ func TestDecodeIdentityRejectsGarbage(t *testing.T) {
 		{"empty", ""},
 		{"not bech32", "hello world"},
 		{"truncated", "AGE-PLUGIN-AV-1"},
-		{"bad checksum", sopsplugin.EncodeIdentity(id.Recipient()) + "q"},
+		// Uppercase Q: a lowercase one would trip bech32's mixed-case guard before the
+		// checksum is ever verified, testing a different rejection than the name claims.
+		{"bad checksum", sopsplugin.EncodeIdentity(id.Recipient()) + "Q"},
 		// A plain recipient in the identity slot is the mistake a first-time user makes.
 		{"recipient not identity", id.Recipient().String()},
+		// The dangerous paste: the private key itself, in the slot that wants a pointer
+		// to it. This is the input the no-echo assertion below exists for.
+		{"secret key not identity", id.String()},
 		// Correct plugin, payload that is not a recipient: reaches the second parse step.
-		{"right plugin wrong payload", plugin.EncodeIdentity("av", []byte("not a recipient"))},
+		{"right plugin wrong payload", plugin.EncodeIdentity(sopsplugin.PluginName, []byte("not a recipient"))},
 		// A recipient of the right shape but the wrong curve point size.
-		{"short payload", plugin.EncodeIdentity("av", nil)},
+		{"short payload", plugin.EncodeIdentity(sopsplugin.PluginName, nil)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := sopsplugin.DecodeIdentity(tc.input)
@@ -87,13 +98,48 @@ func TestDecodeIdentityRejectsGarbage(t *testing.T) {
 			if got != nil {
 				t.Errorf("want a nil recipient alongside the error, got %v", got)
 			}
+			if tc.input != "" && strings.Contains(err.Error(), tc.input) {
+				t.Errorf("error quotes the rejected input back; it must not: %v", err)
+			}
+		})
+	}
+}
+
+// TestDecodeIdentityNamesTheCommonMistakes pins the diagnostics, not just the rejection.
+// age collapses every one of these into "not a plugin identity: <nil>" — it formats an
+// already-nil error — so without these branches the user gets a message that names
+// neither what they pasted nor what belongs there instead.
+func TestDecodeIdentityNamesTheCommonMistakes(t *testing.T) {
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct{ name, input, want string }{
+		{"plain recipient", id.Recipient().String(), "recipient"},
+		{"plugin recipient", plugin.EncodeRecipient(sopsplugin.PluginName, []byte("x")), "recipient"},
+		{"private key", id.String(), "private key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := sopsplugin.DecodeIdentity(tc.input)
+			if err == nil {
+				t.Fatal("want an error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error should say %q, got: %v", tc.want, err)
+			}
+			// Naming the mistake is half of it; the user also has to be told what to
+			// run to get the right string.
+			if !strings.Contains(err.Error(), "av sops identity") {
+				t.Errorf("error should point at the command that prints an identity, got: %v", err)
+			}
 		})
 	}
 }
 
 // TestPluginNameIsTheSingleSource fails if PluginName drifts from the name age actually
-// encodes. The binary name, the identity prefix, and the daemon lookup all key off this
-// one string; nothing else checks that they still agree.
+// encodes. The binary name, the identity prefix, and the daemon lookup will all key off
+// this one string; nothing else checks that they still agree.
 func TestPluginNameIsTheSingleSource(t *testing.T) {
 	if sopsplugin.PluginName != "av" {
 		t.Fatalf("PluginName = %q; the binary must stay age-plugin-av for age to discover it", sopsplugin.PluginName)
