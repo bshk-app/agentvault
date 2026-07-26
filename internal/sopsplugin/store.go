@@ -103,6 +103,14 @@ func (s *Store) Put(name string, key *age.X25519Identity, tier Tier) error {
 	if name == "" {
 		return fmt.Errorf("sops identity: name must not be empty")
 	}
+	if strings.Contains(name, "/") {
+		// Nothing escapes the namespace — Namespace+name is still under sops/ — but the
+		// name would not round-trip: Put("nested/name") stores sops/nested/name, which
+		// List reads back with the prefix trimmed as "nested/name", a string `av sops ls`
+		// cannot tell apart from a namespace of its own. Refusing keeps one name for one
+		// identity everywhere it is printed or typed.
+		return fmt.Errorf("sops identity %q: name must not contain a slash", name)
+	}
 	switch tier {
 	case "":
 		tier = TierNormal
@@ -165,11 +173,22 @@ func (s *Store) List() ([]Info, error) {
 // had it — not as 32 raw bytes. A caller comparing raw bytes against that text would never
 // match and would report every file as "not yours", so the only way in is through
 // age.ParseX25519Recipient and the comparison lives here rather than at each call site.
+//
+// A corrupt entry elsewhere in the namespace does not fail a lookup that matched. Nothing
+// stops `av add sops/notes "reminder"` from landing here, and aborting the scan on it would
+// break decryption for every healthy key while `av sops ls` and `av sops recipient` went on
+// printing them. So the scan completes, a match wins, and a corrupt entry is reported only
+// when nothing matched — corrupt still never masquerades as absent, it just stops taking
+// working keys down with it. List stays strict: it is the diagnostic surface.
 func (s *Store) FindByRecipient(r *age.X25519Recipient) (Identity, error) {
-	ids, err := s.each()
-	if err != nil {
-		return Identity{}, err
+	if r == nil {
+		// A nil recipient matches nothing, which is what ErrNotFound says. The reason to
+		// check rather than let it panic: the daemon dispatches each connection as its own
+		// goroutine with no recover() above it, so a nil dereference here would not fail
+		// one request, it would take avd down for every connected client.
+		return Identity{}, backend.ErrNotFound
 	}
+	ids, corrupt := s.each()
 	want := r.String()
 	for _, id := range ids {
 		// Compare the canonical bech32 text of both sides. Deriving the recipient from
@@ -178,6 +197,9 @@ func (s *Store) FindByRecipient(r *age.X25519Recipient) (Identity, error) {
 		if id.Key.Recipient().String() == want {
 			return id, nil
 		}
+	}
+	if corrupt != nil {
+		return Identity{}, corrupt
 	}
 	return Identity{}, backend.ErrNotFound
 }
@@ -191,18 +213,24 @@ func (s *Store) Remove(name string) error {
 }
 
 // each decodes every identity in the namespace. It is the shared scan behind List and
-// FindByRecipient.
+// FindByRecipient, and it returns BOTH the entries that decoded and the first one that did
+// not, because its two callers weigh a corrupt entry differently: List reports it always,
+// FindByRecipient only when no healthy key matched.
 //
-// A corrupt entry fails the whole scan rather than being skipped. Only the daemon holding
-// the vault identity can write here, so a broken entry means something went genuinely
-// wrong, and a user whose entry got mangled has to be told: silently skipping it would
-// surface as "no identity matched" for a key that is sitting right there in `av sops ls`.
+// A corrupt entry is never silently dropped by either. A user whose entry got mangled has
+// to be told — an entry that just vanished from `av sops ls` looks exactly like a deleted
+// one, and "no identity matched" for a key sitting right there is the worst way to find out.
+//
+// A Resolve failure is different and still aborts: with one encrypted file behind the whole
+// namespace, it means the vault itself is unreadable, so every other entry would fail the
+// same way and there is nothing partial to return.
 func (s *Store) each() ([]Identity, error) {
 	metas, err := s.reader.List(Namespace)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]Identity, 0, len(metas))
+	var corrupt error
 	for _, m := range metas {
 		name := strings.TrimPrefix(m.Locator, Namespace)
 		sec, err := s.reader.Resolve(m.Locator)
@@ -211,11 +239,14 @@ func (s *Store) each() ([]Identity, error) {
 		}
 		id, err := decode(name, sec.Value)
 		if err != nil {
-			return nil, err
+			if corrupt == nil {
+				corrupt = err
+			}
+			continue
 		}
 		out = append(out, id)
 	}
-	return out, nil
+	return out, corrupt
 }
 
 // decode reads one stored value back into an Identity.
@@ -226,18 +257,33 @@ func (s *Store) each() ([]Identity, error) {
 // tier. A leading "{" tells them apart, so a MALFORMED envelope is an error rather than
 // being mistaken for a key and failing later with a stranger message.
 //
-// An unrecognised tier reads as normal rather than erroring. Writing one requires already
-// being able to decrypt and re-encrypt the vault, and anyone who can do that can read the
-// key itself — so the tier is not a barrier against them, and tolerating a typo costs
-// nothing they did not already have.
+// A tier that is neither of the two reads as DANGEROUS, and the direction is the whole
+// point: dangerous only ever costs extra presence checks, while normal skips them, so
+// guessing wrong this way is friction and guessing wrong the other way is a silent
+// downgrade. The case that makes it concrete is a third tier introduced in a later release
+// and then avd rolled back after a bad deploy — the older binary must not read a tier it
+// has never heard of as the cheapest one. An ABSENT or empty tier is not that case: it is
+// the pre-tier format, whose documented default is normal, and it stays normal.
 //
 // SECURITY: value is a private key. Every error here names the identity and stops. age's
-// own parse errors are NOT wrapped: bech32 decoding reports characters of the string it
-// rejected by position and byte value (filippo.io/age/internal/bech32/bech32.go:154,161),
-// and that string is the key.
+// own parse errors are NOT wrapped. The exposure is narrower than that sounds: bech32
+// reports the position and value of the FIRST character it rejects and nothing more
+// (filippo.io/age/internal/bech32/bech32.go:154,161), e.g. `invalid character data part:
+// s[14]=33`, and its caller interpolates that with %v rather than quoting the input
+// (x25519.go:145), so the key itself never appears. Not wrapping is still the right call —
+// it costs nothing and does not depend on age's error formatting staying where it is.
 func decode(name, value string) (Identity, error) {
+	// Trimmed once, then used on both paths. A trailing newline is the likeliest artefact
+	// of a hand edit, and envelopes already get that tolerance free from encoding/json;
+	// parsing the untrimmed value would leave the bare-key path as the only one to reject
+	// it.
+	value = strings.TrimSpace(value)
+	// Pre-seeding Key does double duty. It is the bare-key path's value, and it is also
+	// the fallback for an envelope with no "key" field: `{}` unmarshals without touching
+	// it, so the entry fails as a key that will not parse rather than as an empty one.
+	// Same message either way, one less case to reason about.
 	env := storedIdentity{Key: value}
-	if strings.HasPrefix(strings.TrimSpace(value), "{") {
+	if strings.HasPrefix(value, "{") {
 		if err := json.Unmarshal([]byte(value), &env); err != nil {
 			// Not wrapped: json errors quote the offending input.
 			return Identity{}, fmt.Errorf("sops identity %q: stored entry is not readable", name)
@@ -248,8 +294,12 @@ func decode(name, value string) (Identity, error) {
 		return Identity{}, fmt.Errorf("sops identity %q: stored entry is not a valid age private key", name)
 	}
 	tier := env.Tier
-	if tier != TierNormal && tier != TierDangerous {
+	switch tier {
+	case TierNormal, TierDangerous:
+	case "":
 		tier = TierNormal
+	default:
+		tier = TierDangerous
 	}
 	return Identity{Name: name, Tier: tier, Key: key}, nil
 }

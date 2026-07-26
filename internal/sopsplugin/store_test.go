@@ -150,6 +150,12 @@ func TestPutRejectsBadInput(t *testing.T) {
 	} else if strings.Contains(err.Error(), key.String()) {
 		t.Error("SECURITY: the error carries the private key")
 	}
+	// A slash does not escape the namespace — sops/nested/name is still under it — but the
+	// name stops round-tripping: List trims only the prefix, so it reads back as
+	// "nested/name" and `av sops ls` can no longer show one name per identity.
+	if err := s.Put("nested/name", key, sopsplugin.TierNormal); err == nil {
+		t.Error("want an error for a name containing a slash, got nil")
+	}
 	if len(v.data) != 0 {
 		t.Fatalf("a rejected Put still wrote to the vault: %v", v.data)
 	}
@@ -375,6 +381,68 @@ func TestFindByRecipientEmptyStore(t *testing.T) {
 	}
 }
 
+// TestFindByRecipientSurvivesACorruptNeighbour is the cost of sharing one vault: the sops/
+// namespace is not write-protected, and `av add sops/notes "reminder: rotate in June"`
+// lands in it without a word from anyone. A value that is not an identity must not brick
+// decryption for the keys that are — and it did, because the scan aborted on the first
+// entry that failed to decode. The user-visible shape of that bug is the nasty part: `av
+// sops ls` and `av sops recipient work` keep printing the healthy key while every single
+// unwrap fails.
+func TestFindByRecipientSurvivesACorruptNeighbour(t *testing.T) {
+	s, v := newTestStore(t)
+	key := genKey(t)
+	if err := s.Put("work", key, sopsplugin.TierDangerous); err != nil {
+		t.Fatal(err)
+	}
+	v.data["sops/notes"] = "reminder: rotate this in June"
+
+	got, err := s.FindByRecipient(key.Recipient())
+	if err != nil {
+		t.Fatalf("a junk entry beside a healthy key broke its lookup: %v", err)
+	}
+	if got.Name != "work" || got.Key.String() != key.String() {
+		t.Fatal("matched the wrong identity")
+	}
+	if got.Tier != sopsplugin.TierDangerous {
+		t.Errorf("Tier = %q, want %q", got.Tier, sopsplugin.TierDangerous)
+	}
+
+	// Tolerating the junk entry must not soften the other half of the contract: with
+	// nothing matched, the corrupt entry is still reported, because Task 6 maps a corrupt
+	// store to an internal error and an unknown recipient to a bad request. Reporting the
+	// wrong one of those is how a broken vault gets mistaken for a file that is simply
+	// not ours.
+	if _, err := s.FindByRecipient(genKey(t).Recipient()); err == nil {
+		t.Error("want the corrupt entry reported when nothing matched")
+	} else if errors.Is(err, backend.ErrNotFound) {
+		t.Error("a corrupt entry was reported as a missing one")
+	}
+	// List stays strict either way: it is the diagnostic surface, and the place the user
+	// goes to find out why. Hiding the bad entry there would leave them with no surface
+	// that shows it at all.
+	if _, err := s.List(); err == nil {
+		t.Error("List hid the corrupt entry")
+	}
+}
+
+// TestFindByRecipientNil: the daemon dispatches every connection as its own goroutine and
+// nothing above it calls recover(), so a nil dereference in this path would not fail one
+// request — it would take avd down for every client holding a connection. A nil recipient
+// matches nothing, which is precisely what ErrNotFound already means.
+func TestFindByRecipientNil(t *testing.T) {
+	s, _ := newTestStore(t)
+	if err := s.Put("work", genKey(t), sopsplugin.TierNormal); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.FindByRecipient(nil)
+	if !errors.Is(err, backend.ErrNotFound) {
+		t.Fatalf("err = %v, want backend.ErrNotFound", err)
+	}
+	if got.Key != nil {
+		t.Error("want a zero Identity alongside the error")
+	}
+}
+
 // TestNamespaceIsolation is the other half of what the prefix buys. Ordinary secrets and
 // SOPS identities share one vault, so the store must be blind to everything outside sops/
 // (or `av sops ls` starts listing the user's API tokens) and must never write where an
@@ -461,10 +529,12 @@ func TestRemove(t *testing.T) {
 // resolve — refusing them would lock a user out of a key that is sitting right there, which
 // is a worse outcome than assuming the documented default tier.
 //
-// Defaulting an UNRECOGNISED tier down to normal is safe here for a specific reason:
-// writing one requires already being able to decrypt and re-encrypt the vault, and anyone
-// who can do that can read the key directly. The tier is not a barrier against them, so
-// tolerating a typo costs nothing an attacker did not already have.
+// Tolerance has a direction. An UNRECOGNISED tier reads as dangerous, not normal: dangerous
+// only ever costs extra presence checks, normal skips them, so a wrong guess this way is
+// friction and a wrong guess the other way is a silent downgrade. The concrete case is a
+// third tier shipped in a later release and then avd rolled back — the older binary must
+// not read a tier it has never heard of as the cheapest one. An ABSENT or empty tier is a
+// different thing entirely: that is the pre-tier format, whose documented default is normal.
 func TestReadsToleratesHandEditedEntries(t *testing.T) {
 	key := genKey(t)
 	for _, tc := range []struct {
@@ -475,8 +545,13 @@ func TestReadsToleratesHandEditedEntries(t *testing.T) {
 		{"bare key, no envelope", key.String(), sopsplugin.TierNormal},
 		{"envelope without a tier", fmt.Sprintf(`{"key":%q}`, key.String()), sopsplugin.TierNormal},
 		{"envelope with an empty tier", fmt.Sprintf(`{"key":%q,"tier":""}`, key.String()), sopsplugin.TierNormal},
-		{"envelope with an unknown tier", fmt.Sprintf(`{"key":%q,"tier":"paranoid"}`, key.String()), sopsplugin.TierNormal},
+		{"envelope with an unknown tier", fmt.Sprintf(`{"key":%q,"tier":"paranoid"}`, key.String()), sopsplugin.TierDangerous},
 		{"envelope with an unknown field", fmt.Sprintf(`{"key":%q,"tier":"dangerous","future":1}`, key.String()), sopsplugin.TierDangerous},
+		// A trailing newline is the likeliest artefact of a hand edit of all — every
+		// editor adds one — and the bare-key path was the only one rejecting it, since
+		// encoding/json hands the envelope that tolerance for free.
+		{"bare key with a trailing newline", key.String() + "\n", sopsplugin.TierNormal},
+		{"envelope with surrounding whitespace", fmt.Sprintf("  {\"key\":%q,\"tier\":\"dangerous\"}\n", key.String()), sopsplugin.TierDangerous},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, v := newTestStore(t)
@@ -507,10 +582,10 @@ func TestReadsToleratesHandEditedEntries(t *testing.T) {
 // TestCorruptEntriesErrorWithoutEchoingTheValue covers the entries that are NOT salvageable.
 // Two things are asserted and both matter: the read fails loudly rather than reporting the
 // identity as absent (a user whose entry got mangled must be told, not left with "no
-// identity matched"), and the message names the identity and nothing else. age's own parse
-// errors report characters of the string being decoded by position and value
-// (internal/bech32/bech32.go:154,161) — and that string is a private key, so those errors
-// must never be wrapped and surfaced.
+// identity matched"), and the message names the identity and nothing else. The string being
+// decoded is a private key, and age's own parse errors report the position and value of the
+// first character they reject (internal/bech32/bech32.go:154,161) — never the whole key, but
+// close enough to it that wrapping them buys nothing worth the exposure.
 func TestCorruptEntriesErrorWithoutEchoingTheValue(t *testing.T) {
 	key := genKey(t)
 	for _, tc := range []struct{ name, value string }{
@@ -538,7 +613,9 @@ func TestCorruptEntriesErrorWithoutEchoingTheValue(t *testing.T) {
 				t.Errorf("SECURITY: error echoes the stored value back: %v", err)
 			}
 			// The scanning paths must be just as loud: a corrupt entry that silently
-			// vanished from List would look exactly like a deleted one.
+			// vanished from List would look exactly like a deleted one. FindByRecipient
+			// reports it here because nothing else in the store matched — see
+			// TestFindByRecipientSurvivesACorruptNeighbour for why a match outranks it.
 			if _, err := s.List(); err == nil {
 				t.Error("List skipped a corrupt entry instead of reporting it")
 			}
