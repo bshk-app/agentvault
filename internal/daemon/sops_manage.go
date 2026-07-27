@@ -36,7 +36,10 @@ import (
 //  2. resolve the vault backend, so a config fault ("no local vault — run 'av setup'
 //     first") reports precisely regardless of lock state;
 //  3. open the session, or refuse under NoPrompt;
-//  4. act.
+//  4. for the three that MUTATE, spend a fresh presence check if the identity about to be
+//     destroyed is dangerous-tier — which needs the stored entry read first, so it cannot
+//     move above step 3 (sopsExisting);
+//  5. act.
 
 // sopsKeygen serves "sops_keygen": generate a NEW SOPS identity, store it under the given
 // name and tier, and return its public half.
@@ -60,6 +63,17 @@ func (s *Server) sopsKeygen(req ipc.Request) ipc.Response {
 	}
 	if rejection := s.sopsEnsureUnlocked(req.ID, "keygen", p.NoPrompt); rejection != nil {
 		return *rejection
+	}
+	// A name that is already taken makes this a REPLACE rather than a create: it destroys a
+	// key instead of adding one, so it inherits the stored tier and, at the dangerous tier,
+	// costs a presence check. See sopsExisting for both.
+	if old, replacing := sopsExisting(store, p.Name); replacing {
+		if rejection := s.sopsTierGate(req.ID, "keygen", "sops_keygen", sopsReplacePrompt(p.Name), old, p.NoPrompt); rejection != nil {
+			return *rejection
+		}
+		if p.Tier == "" {
+			tier = old.Tier
+		}
 	}
 	// Generated AFTER the gates on purpose: a request that gets refused should not have
 	// minted key material at all, however briefly.
@@ -111,6 +125,16 @@ func (s *Server) sopsPut(req ipc.Request) ipc.Response {
 	}
 	if rejection := s.sopsEnsureUnlocked(req.ID, "import", p.NoPrompt); rejection != nil {
 		return *rejection
+	}
+	// Importing over a name that is taken destroys the key that was there — the same
+	// REPLACE sopsKeygen handles, reached from `av sops import` instead. See sopsExisting.
+	if old, replacing := sopsExisting(store, p.Name); replacing {
+		if rejection := s.sopsTierGate(req.ID, "import", "sops_put", sopsReplacePrompt(p.Name), old, p.NoPrompt); rejection != nil {
+			return *rejection
+		}
+		if p.Tier == "" {
+			tier = old.Tier
+		}
 	}
 	if err := store.Put(p.Name, key, tier); err != nil {
 		return sopsStoreError(req.ID, "import", p.Name, err)
@@ -171,10 +195,13 @@ func (s *Server) sopsList(req ipc.Request) ipc.Response {
 
 // sopsRm serves "sops_rm": delete one stored identity.
 //
-// The daemon just removes, exactly as `case "rm"` does. The "this destroys the only copy of
-// a key that files are encrypted to" confirmation is `av sops rm`'s job: a TTY prompt has no
-// meaning on this side of a socket, and putting the guard here would not make the daemon
-// safer — it would only make the CLI's guard look optional.
+// The "are you sure" text a human reads is still `av sops rm`'s job — a TTY prompt has no
+// meaning on this side of a socket. The PRESENCE check is not, and that is Task 9a's review
+// correcting this comment's first draft: a socket cannot demand a confirmation but it can
+// demand a biometric, and an agent cannot fake one. Deleting a dangerous-tier identity
+// therefore costs a fresh check here, exactly as reading one file encrypted to it does
+// (sopsTierGate). Without it, an agent holding an open session destroyed a production key
+// with one RPC while merely reading a file with that key was guarded.
 //
 // The name is deliberately NOT run through sopsplugin.ValidateName. This RPC is the only
 // way to delete anything under sops/ — `av rm sops/x` is refused by the namespace guard
@@ -193,12 +220,25 @@ func (s *Server) sopsRm(req ipc.Request) ipc.Response {
 	if rejection := s.sopsEnsureUnlocked(req.ID, "rm", p.NoPrompt); rejection != nil {
 		return *rejection
 	}
+	// Read BEFORE the delete, which this RPC previously did not do at all: the stored tier
+	// is the only thing that says whether this delete needs a presence check, and once
+	// Remove has run there is no entry left to ask. An entry that will not decode reports
+	// nothing to gate (sopsExisting) and falls straight through to Remove — that is what
+	// keeps this the only way out of a corrupt namespace.
+	old, found := sopsExisting(store, p.Name)
+	if found {
+		if rejection := s.sopsTierGate(req.ID, "rm", "sops_rm", fmt.Sprintf(
+			"Delete the SOPS identity %q — every file encrypted to it becomes unreadable", p.Name),
+			old, p.NoPrompt); rejection != nil {
+			return *rejection
+		}
+	}
 	if err := store.Remove(p.Name); err != nil {
 		return sopsStoreError(req.ID, "rm", p.Name, err)
 	}
-	// Tier is left empty: Remove does not read the entry, and guessing one would put a
-	// value in the log that was never checked against what was deleted.
-	s.sopsManageAudit("sops_rm", p.Name, "")
+	// The tier logged is the one read above, and empty when the entry would not decode: a
+	// value checked against what was actually deleted rather than guessed.
+	s.sopsManageAudit("sops_rm", p.Name, old.Tier)
 	ok, _ := json.Marshal("ok")
 	return ipc.Response{ID: req.ID, Result: ok}
 }
@@ -221,6 +261,41 @@ func sopsValidate(reqID uint64, name, tier string) (sopsplugin.Tier, *ipc.Respon
 		return "", &r
 	}
 	return t, nil
+}
+
+// sopsExisting reports the identity currently stored under name, and whether there is one
+// to lose. It is what separates a REPLACE from a CREATE on the two RPCs that do both, and
+// the whole of Task 9a's review amendment hangs off that distinction:
+//
+//   - A REPLACE that names NO tier keeps the STORED one. An empty Tier means "the documented
+//     default" on a create, and it was meaning the same thing on a replace: seeding `work` at
+//     dangerous and then importing over it left the old key gone AND the tier reading back as
+//     normal. Losing the key is what the caller asked for; the demotion is not, and it is
+//     silent — production files simply stop prompting. An explicitly supplied tier still
+//     wins, because that is a deliberate change rather than an omission.
+//   - A REPLACE of a DANGEROUS identity costs a fresh presence check (sopsTierGate), for the
+//     same reason reading one file encrypted to it does. A create costs none: nothing is
+//     destroyed, so there is nothing to lose yet.
+//
+// An entry that will not DECODE reports false, deliberately — and so does a vault that will
+// not read. Junk under sops/ holds no key worth protecting and no tier worth carrying, and
+// putting a biometric in front of the entry a user is trying to clear would break the
+// recovery route Task 4's review established. A genuinely broken vault is harmless here for
+// a different reason: the mutation that follows reads the same vault and reports the real
+// failure itself, rather than this lookup guessing at it.
+func sopsExisting(store *sopsplugin.Store, name string) (sopsplugin.Identity, bool) {
+	id, err := store.Get(name)
+	return id, err == nil
+}
+
+// sopsReplacePrompt is what the human sees when a keygen or an import is about to overwrite
+// a dangerous-tier identity. It is shared so the two RPCs cannot describe the same
+// destruction differently, and it names the CONSEQUENCE rather than the operation: at this
+// point the only useful question is whether the reader knows those files exist.
+//
+// SECURITY: it takes the name, never the Identity — nothing here can reach a key.
+func sopsReplacePrompt(name string) string {
+	return fmt.Sprintf("Replace the SOPS identity %q — every file encrypted to the old key becomes unreadable", name)
 }
 
 // sopsIdentityInfo renders one identity for the wire: its name, its tier, its PUBLIC

@@ -95,7 +95,9 @@ func (s *Server) sopsUnwrap(req ipc.Request) ipc.Response {
 	if err != nil {
 		return s.sopsFindError(req.ID, r, err)
 	}
-	if rejection := s.sopsTierGate(req.ID, id, p.NoPrompt); rejection != nil {
+	// SECURITY: the prompt names the identity, never its key.
+	if rejection := s.sopsTierGate(req.ID, "unwrap", "sops_unwrap",
+		fmt.Sprintf("Decrypt a SOPS file with %q", id.Name), id, p.NoPrompt); rejection != nil {
 		return *rejection
 	}
 
@@ -143,12 +145,12 @@ func (s *Server) sopsUnwrap(req ipc.Request) ipc.Response {
 			detail = "malformed stanza"
 			msg = fmt.Sprintf("sops unwrap %q: the file's header stanzas are malformed", id.Name)
 		}
-		s.sopsAudit(id, detail)
+		s.sopsAudit("sops_unwrap", id, detail)
 		// SECURITY: age's error is NOT wrapped. Its text is secret-free today, but the
 		// file key is live in this frame and an error string is the easiest way out.
 		return errResp(req.ID, code, msg)
 	}
-	s.sopsAudit(id, "ok")
+	s.sopsAudit("sops_unwrap", id, "ok")
 	res, _ := json.Marshal(ipc.SopsUnwrapResult{FileKey: fileKey})
 	return ipc.Response{ID: req.ID, Result: res}
 }
@@ -234,8 +236,8 @@ func (s *Server) sopsEnsureUnlocked(reqID uint64, op string, noPrompt bool) *ipc
 	return &r
 }
 
-// sopsTierGate applies decision 5's per-identity access policy and returns a
-// ready-to-send rejection, or nil to proceed.
+// sopsTierGate applies decision 5's per-identity access policy to one identity and returns
+// a ready-to-send rejection, or nil to proceed.
 //
 // normal rides the already-open session: one presence check per COMMAND, which is what
 // makes `helm secrets template` over thirty files bearable. dangerous demands a FRESH
@@ -249,7 +251,21 @@ func (s *Server) sopsEnsureUnlocked(reqID uint64, op string, noPrompt bool) *ipc
 // skipping it because a session happens to be fresh would mean the first dangerous file of
 // the day is the one that never prompts. It matches `av run` on a dangerous entry from a
 // locked vault, which costs the same two.
-func (s *Server) sopsTierGate(reqID uint64, id sopsplugin.Identity, noPrompt bool) *ipc.Response {
+//
+// It guards DESTRUCTION as well as reading, which is decision 5 as Task 9a's review amended
+// it. Reading one file encrypted to a dangerous identity cost a presence check while
+// DELETING that identity cost nothing but an open session — so the cheap operation was the
+// one that makes every file ever encrypted to the key permanently unreadable. An ordinary
+// vault secret can be fetched again from wherever it came from; a SOPS identity is the only
+// copy. So sops_rm, and the REPLACE path of sops_keygen/sops_put, come through here too.
+// Creating a new identity does not: there is nothing to lose yet.
+//
+// The three strings keep the same split as the rest of this file (see sopsLockedMsg): op is
+// the SUBCOMMAND word a human typed, kind is the audit Kind a machine greps for, and prompt
+// is the sentence the biometric dialog shows. prompt must say what is about to happen — on
+// the destroy paths it is the last thing standing between a user and a key nobody can bring
+// back. SECURITY: every call site builds it from id.Name and never from id.
+func (s *Server) sopsTierGate(reqID uint64, op, kind, prompt string, id sopsplugin.Identity, noPrompt bool) *ipc.Response {
 	if id.Tier != sopsplugin.TierDangerous {
 		return nil
 	}
@@ -260,7 +276,7 @@ func (s *Server) sopsTierGate(reqID uint64, id sopsplugin.Identity, noPrompt boo
 		// FILE, so carrying that policy over would hang an agent thirty times instead of
 		// once. CodeLocked is the honest code — nothing was denied, because nothing was
 		// asked — and it hands the agent the same clean exit-69 pause a locked vault does.
-		s.sopsAudit(id, "no presence available")
+		s.sopsAudit(kind, id, "no presence available")
 		// The MESSAGE, however, is deliberately not ErrLocked's "vault locked". The vault
 		// is not locked here: the session is open (step 3 saw to that) and only the fresh
 		// per-file check is missing. "vault locked" would send a human to `av unlock`,
@@ -269,27 +285,29 @@ func (s *Server) sopsTierGate(reqID uint64, id sopsplugin.Identity, noPrompt boo
 		// text rather than substitute one of its own (Task 8), because it is the last layer
 		// that can still tell the two CodeLocked situations apart.
 		r := errResp(reqID, ipc.CodeLocked, fmt.Sprintf(
-			"sops unwrap %q: dangerous-tier identity needs a fresh presence check, and this caller set no_prompt",
-			id.Name))
+			"sops %s %q: dangerous-tier identity needs a fresh presence check, and this caller set no_prompt",
+			op, id.Name))
 		return &r
 	}
 	if s.presence == nil {
 		r := errResp(reqID, ipc.CodeInternal, "presence not configured")
 		return &r
 	}
-	// SECURITY: the prompt names the identity, never its key.
-	if err := s.presence.Prompt(fmt.Sprintf("Decrypt a SOPS file with %q", id.Name)); err != nil {
+	if err := s.presence.Prompt(prompt); err != nil {
 		// Kind "denied" is the resolver's vocabulary for a refused dangerous touch; one
-		// grep collects every denial in the log regardless of which RPC asked.
-		s.audit.Log(audit.Event{Kind: "denied", Name: id.Name, Tier: string(id.Tier), Detail: "sops unwrap"})
+		// grep collects every denial in the log regardless of which RPC asked. Detail names
+		// the operation that was refused, in the subcommand's vocabulary, so a denial on a
+		// destroy is not filed as one on a read.
+		s.audit.Log(audit.Event{Kind: "denied", Name: id.Name, Tier: string(id.Tier), Detail: "sops " + op})
 		r := errResp(reqID, ipc.CodeDenied, ErrDenied.Error())
 		return &r
 	}
 	return nil
 }
 
-// sopsAudit records ONE entry per unwrap that reached an identity: which identity, at
-// which tier, and how it went.
+// sopsAudit records ONE entry for an operation that reached an identity: which identity, at
+// which tier, and how it went. kind is the RPC's audit Kind — "sops_unwrap" for every call
+// in this file, and the management RPC's own when sopsTierGate refuses a destroy.
 //
 // SECURITY (structural): audit.Event has no value field, so nothing here CAN carry key
 // material — but the arguments still matter. It takes the whole Identity and reads only
@@ -299,6 +317,6 @@ func (s *Server) sopsTierGate(reqID uint64, id sopsplugin.Identity, noPrompt boo
 // restates it: a new outcome must be added there too, deliberately. That allowlist is the
 // leak assertion — a Detail built from anything but a literal is caught by it whatever
 // encoding the accident used, which no test for base64 or hex can promise.
-func (s *Server) sopsAudit(id sopsplugin.Identity, outcome string) {
-	s.audit.Log(audit.Event{Kind: "sops_unwrap", Name: id.Name, Tier: string(id.Tier), Detail: outcome})
+func (s *Server) sopsAudit(kind string, id sopsplugin.Identity, outcome string) {
+	s.audit.Log(audit.Event{Kind: kind, Name: id.Name, Tier: string(id.Tier), Detail: outcome})
 }

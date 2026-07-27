@@ -149,6 +149,39 @@ separate decryption. Touch ID on every file would make the feature unusable.
   agent, and an agent that can call `sops_unwrap` at will can equally call `sops -d` at
   will.
 
+**Amended by Task 9a's review — the tier gates DESTRUCTION, not just reading.** As first
+written the policy covered `sops_unwrap` alone, and the measured result was backwards:
+unwrapping one file with a `dangerous` identity cost one presence check, `sops_rm` of that
+same identity cost none, and a `keygen`/`import` replacing it cost none either. Reading one
+file was guarded per file; deleting the key — which makes *every* file ever encrypted to it
+permanently unreadable — was guarded by nothing but an open session, so an agent holding one
+destroyed a production key with a single RPC and no biometric.
+
+This is where a SOPS identity differs from an ordinary vault entry, and it is why the daemon
+guards the destroy rather than leaving it to the CLI. An ordinary secret that is deleted can
+be fetched again from wherever it came from; a SOPS identity is the only copy, and its loss
+takes already-committed files with it. The earlier argument for leaving the guard to
+`av sops rm` — that a TTY confirmation is meaningless across a socket — is true and beside
+the point: a **presence check** is precisely what a socket can demand and an agent cannot
+fake. `av sops rm`'s confirmation still exists, for the human; the biometric exists for
+everything else.
+
+So `sops_rm`, and the *replace* path of `sops_keygen`/`sops_put`, spend the same fresh check
+`sops_unwrap` does when the identity about to be destroyed is `dangerous`. Creating a new
+identity spends none — nothing is destroyed, so there is nothing to lose yet. Two
+consequences worth writing down:
+
+- `sops_rm` now reads the stored entry before deleting it, which it previously never did. An
+  entry that will not **decode** passes straight through ungated: junk under `sops/` holds no
+  key worth protecting, and a biometric in front of it would trap the user inside the exact
+  state this command is the only way out of (the recovery route Task 4's review established).
+- **A replace that names no tier keeps the STORED tier**, rather than applying the documented
+  default. An empty tier meaning `normal` is right for a create and wrong for a replace: a
+  user who confirmed "yes, replace the key" agreed to lose the key, not to have `dangerous`
+  silently demoted to `normal` — after which the production files that used to demand a touch
+  each simply stop asking. An explicitly supplied tier still wins, because that is a
+  deliberate change rather than an omission.
+
 ### 6. Agents fail fast, as they do everywhere else
 
 SOPS collects identity-loading errors and reports them only if decryption fails outright,
