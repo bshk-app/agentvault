@@ -565,6 +565,33 @@ Also detect the `sops` version and warn when it is below 3.10, which is where pl
 
 Commit after each subcommand.
 
+### What Task 9a's review handed to 9b
+
+Task 9a built the daemon RPCs and the client methods. Four things its review identified are
+**not** daemon problems and land here:
+
+1. **`av sops import` on a two-key `keys.txt` makes two `SopsPut` calls.** There is no batch
+   RPC and no transaction, deliberately — one call per key is the shape `sops_put` was built
+   for. So partial failure is `av`'s to handle: if the first key stores and the second does
+   not, the rewrite must **not** replace `keys.txt` as though both landed. Rewrite only after
+   every key is in, or rewrite only the lines that made it and say plainly which did not.
+   Silently dropping a key that is still needed is the same failure mode as the
+   `SOPS_AGE_KEY_FILE` hazard above: everything reports success and something is gone.
+2. **The overwrite confirmation needs a `SopsList` first.** The daemon will replace an
+   existing name without asking anything a user can read, so `av` has to look before it
+   leaps. Since the review's fix, an empty `--tier` on a replace now **carries the stored
+   tier forward**, so the CLI no longer has to read the tier back and send it again to avoid
+   demoting the identity — but it must still tell the user *what* it is about to destroy.
+3. **`av sops recipient` / `av sops identity` are printers over `SopsList`**, not RPCs of
+   their own: every listed identity already carries its recipient and its
+   `AGE-PLUGIN-AV-1…` pointer. That means "no such identity" is produced **client-side**, so
+   its wording has to be kept aligned by hand with the daemon's
+   `sops rm "x": no such SOPS identity`. Two spellings of the same condition, in two
+   packages, with nothing linking them.
+4. **Never derive `--name` from a line read out of `keys.txt`.** The name reaches the audit
+   log as `audit.Event.Name`, and a `keys.txt` line is key material or adjacent to it. Take
+   the name from `--name` or generate one; the same rule already applies to `av add`/`av rm`.
+
 ---
 
 ## Task 10: Build and packaging
