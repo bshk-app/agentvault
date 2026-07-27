@@ -729,6 +729,22 @@ non-macOS platforms finally execute. What each risk turned into:
   `AV_SOCKET_PATH`, consulted by `DefaultSocketPath` on every platform, with a test that
   is deliberately not build-tagged and a doc section in docs/sops.md. The smoke script now
   sets it too, so the Linux job exercises the override end to end.
+- **Newly surfaced, and the biggest one: `avd` cannot run on Windows.** Making the job
+  green exposed it. `selectPresence()` in `cmd/avd/main.go` treats a missing presence
+  provider as fatal — by design, "avd must never run without a real presence check" — and
+  `newTouchIDPresence` in `internal/daemon/presence_windows.go` *always* returns an error
+  because the Windows Hello WinRT bridge is not implemented. So the only configuration in
+  which `avd` starts on Windows is `AV_TEST_AUTH=allow`. Every green Windows test that
+  spawns a daemon uses that stub; `TestE2ELockedRunFails`, which needs an `avd` with no
+  auth, is skipped there for exactly this reason. What Windows CI proves is the transport,
+  plugin discovery, `AV_SOCKET_PATH` and the SOPS decrypt path — not a usable product.
+  Windows Hello is the blocker for that, and it is a feature, not a fix.
+- **Also open: the config dir needed its own Windows lever too.** Same shape as the socket
+  path: the zero-config tests isolated the store with `$XDG_CONFIG_HOME`, which
+  `config.DefaultConfigDir` ignores on Windows in favour of `%APPDATA%`. Here the product
+  already had a working Windows lever, so no product change was needed — the tests now set
+  both and derive the expected dir from `config.DefaultConfigDir()` rather than spelling
+  the leaf out (it is `agentvault` on Unix, `AgentVault` on Windows).
 - **Still open: owner-only files on Windows.** The permission-bit assertions above are
   skipped because `Mode().Perm()` cannot express `0600` on NTFS — but the *property* they
   stand for is real and currently has no Windows expression. Making the identity, vault

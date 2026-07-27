@@ -6,12 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"filippo.io/age"
 
 	"github.com/beshkenadze/agentvault/internal/backend/agefile"
+	"github.com/beshkenadze/agentvault/internal/config"
 	"github.com/beshkenadze/agentvault/internal/ipc"
 	"github.com/beshkenadze/agentvault/internal/transport"
 )
@@ -213,7 +215,11 @@ func buildAndAutostartZeroConfig(t *testing.T) (sockPath, cfgDir string) {
 	// spawned avd inherits this env (autostart uses exec.Command with no custom Env).
 	t.Setenv("AV_AVD_PATH", avd)
 	t.Setenv("HOME", dir)
+	// Each platform's OWN lever for the config dir: config.DefaultConfigDir reads
+	// $XDG_CONFIG_HOME on Unix and %APPDATA% on Windows. Setting both is how one test
+	// isolates the store everywhere — neither platform reads the other's variable.
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+	t.Setenv("APPDATA", filepath.Join(dir, "xdg"))
 	t.Setenv("AV_TEST_AUTH", "allow")   // unlock without a biometric prompt
 	t.Setenv("AV_TEST_ENCLAVE", "stub") // identity-passthrough wrap/unwrap, no Enclave
 	// Belt-and-braces: ensure no AV_AGE_* leaks in from the outer env so we truly
@@ -222,7 +228,10 @@ func buildAndAutostartZeroConfig(t *testing.T) (sockPath, cfgDir string) {
 	os.Unsetenv("AV_AGE_IDENTITY")
 	os.Unsetenv("AV_AGE_IDENTITY_ENCLAVE")
 
-	cfgDir = filepath.Join(dir, "xdg", "agentvault")
+	// Asked of the SSOT rather than spelled out: the leaf is "agentvault" on Unix and
+	// "AgentVault" on Windows, and the daemon we spawn resolves it through this same
+	// function off the same inherited env.
+	cfgDir = config.DefaultConfigDir()
 	sockPath = filepath.Join(dir, "agentvault", "avd.sock")
 	// One endpoint for both sides. The spawned avd inherits this env and resolves the
 	// SAME path through transport.DefaultSocketPath, on every platform.
@@ -268,7 +277,11 @@ func buildAndAutostartKeychain(t *testing.T) (sockPath, cfgDir, keystoreDir stri
 
 	t.Setenv("AV_AVD_PATH", avd)
 	t.Setenv("HOME", dir)
+	// Each platform's OWN lever for the config dir: config.DefaultConfigDir reads
+	// $XDG_CONFIG_HOME on Unix and %APPDATA% on Windows. Setting both is how one test
+	// isolates the store everywhere — neither platform reads the other's variable.
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+	t.Setenv("APPDATA", filepath.Join(dir, "xdg"))
 	t.Setenv("AV_TEST_AUTH", "allow")         // keychain unwrapper's presence prompt + dangerous-tier
 	t.Setenv("AV_TEST_KEYSTORE", keystoreDir) // file-backed keystore stub (no real login keychain)
 	// No AV_TEST_ENCLAVE: the real enclave.Wrap fails here → provision falls back to keychain.
@@ -278,7 +291,10 @@ func buildAndAutostartKeychain(t *testing.T) (sockPath, cfgDir, keystoreDir stri
 	os.Unsetenv("AV_AGE_IDENTITY")
 	os.Unsetenv("AV_AGE_IDENTITY_ENCLAVE")
 
-	cfgDir = filepath.Join(dir, "xdg", "agentvault")
+	// Asked of the SSOT rather than spelled out: the leaf is "agentvault" on Unix and
+	// "AgentVault" on Windows, and the daemon we spawn resolves it through this same
+	// function off the same inherited env.
+	cfgDir = config.DefaultConfigDir()
 	sockPath = filepath.Join(dir, "agentvault", "avd.sock")
 	// One endpoint for both sides. The spawned avd inherits this env and resolves the
 	// SAME path through transport.DefaultSocketPath, on every platform.
@@ -390,6 +406,17 @@ func TestE2EScrubMasksRealSecret(t *testing.T) {
 func TestE2ELockedRunFails(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration: builds and spawns the real avd")
+	}
+	// The locked state this test needs is produced by starting avd with NO auth
+	// configured — and on Windows an avd with no auth does not start at all. Its
+	// selectPresence() treats a missing presence provider as fatal ("avd must never run
+	// without a real presence check"), and newTouchIDPresence in
+	// internal/daemon/presence_windows.go always errors because the Windows Hello WinRT
+	// bridge is not implemented. So the only configuration that lets avd run on Windows
+	// today is AV_TEST_AUTH=allow, which is precisely the state this test must avoid.
+	// Not a test defect: avd is not yet runnable in production on Windows.
+	if runtime.GOOS == "windows" {
+		t.Skip("avd cannot start on Windows without AV_TEST_AUTH=allow: Windows Hello presence is unimplemented (internal/daemon/presence_windows.go)")
 	}
 	_, sockPath, manifestPath := buildAndAutostartEnv(t, "") // no AV_TEST_AUTH
 

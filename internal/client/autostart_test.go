@@ -40,6 +40,12 @@ func TestAutostartColdPing(t *testing.T) {
 	sockPath := filepath.Join(dir, "agentvault", "avd.sock")
 
 	t.Setenv("AV_AVD_PATH", avd)
+	// This test is about AUTOSTART, not about auth — Ping needs no presence check. The
+	// stub is required anyway because avd's selectPresence() is fatal when it cannot
+	// build a presence provider, and on Windows it never can: newTouchIDPresence in
+	// internal/daemon/presence_windows.go always errors (no WinRT bridge). Without this
+	// the daemon would exit on startup and the failure would read as "did not come up".
+	t.Setenv("AV_TEST_AUTH", "allow")
 	// One endpoint for both sides. The spawned avd inherits this env and resolves the
 	// SAME path through transport.DefaultSocketPath, so client and daemon meet whatever
 	// the platform default would have been.

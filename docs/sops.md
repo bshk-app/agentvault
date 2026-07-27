@@ -345,7 +345,7 @@ refused outright, so a typo cannot silently require nothing.
 |---|---|
 | Linux | CI (`.github/workflows/ci.yml`) runs `go test ./...` and the whole of `scripts/smoke-sops.sh` on every push and pull request, against pinned real binaries — sops 3.13.1, age 1.3.1, helm 4.2.2 with helm-secrets 4.7.7, kustomize 5.8.1 and ksops 4.5.1. That covers `sops -d`, `sops updatekeys`, a two-pointer `keys.txt`, `av sops import`, the locked-vault message, `helm secrets template` and `kustomize build` + ksops. `AV_SMOKE_REQUIRE` fails the job if any of them skips. |
 | macOS | The same script, run by hand — every check passes with the toolchain above. There is no macOS CI job: Secure Enclave and Touch ID are unreachable on a hosted runner, which is where the macOS-only risk actually lives, so a job could only re-run what Linux already covers. |
-| Windows | CI runs `go test ./...` on `windows-latest` and it is **green**. Plugin discovery through age's `exec.LookPath` (the reason the Makefile emits `age-plugin-av.exe`), named-pipe transport, and the full daemon end-to-end path — `cmd/age-plugin-av`'s test drives a real `avd` over a real pipe — all pass. Two assertions remain skipped, both about POSIX mode bits; see [Windows: what is skipped](#windows-what-is-skipped). `scripts/smoke-sops.sh` still does not run there: it is bash driving a unix socket and refuses to start. |
+| Windows | CI runs `go test ./...` on `windows-latest` and it is **green**. Plugin discovery through age's `exec.LookPath` (the reason the Makefile emits `age-plugin-av.exe`), named-pipe transport, and the daemon end-to-end path — `cmd/age-plugin-av`'s test drives a real `avd` over a real pipe, decrypting through `sops` — all pass. But note the ceiling: **`avd` only runs on Windows with `AV_TEST_AUTH=allow`**, so what CI proves there is the transport and plugin machinery, not a usable product. See [Windows: what is skipped](#windows-what-is-skipped). `scripts/smoke-sops.sh` still does not run there: it is bash driving a unix socket and refuses to start. |
 
 ### Pointing `av` and `avd` at one endpoint: `AV_SOCKET_PATH`
 
@@ -390,9 +390,24 @@ fixed except two assertions that cannot be expressed on NTFS:
    assert about. Denying it for real needs an NTFS DACL, which Go's `os` package cannot
    express.
 
-The security property behind (1) — owner-only files — still needs a real expression on
-Windows via ACLs. That is a genuine gap, tracked as an open risk in
-`docs/plans/2026-07-26-sops-age-plugin.md`; it is not something a test can assert today.
+3. **`TestE2ELockedRunFails`** (`internal/client`) is skipped, and this one is the
+   important skip. It needs an `avd` started with **no** auth configured, and on Windows
+   such an `avd` does not start at all: `selectPresence()` in `cmd/avd/main.go` treats a
+   missing presence provider as fatal — "avd must never run without a real presence
+   check" — and `newTouchIDPresence` in `internal/daemon/presence_windows.go` *always*
+   errors, because the Windows Hello WinRT bridge is not implemented. The only
+   configuration in which `avd` runs on Windows today is `AV_TEST_AUTH=allow`, which is
+   exactly the state this test must avoid.
+
+**The headline Windows limitation is (3), not the mode bits.** AgentVault's daemon has no
+presence provider on Windows, so it cannot be run there outside tests: every green Windows
+test that spawns a daemon does so with the test stub. Plugin discovery, the named-pipe
+transport, `AV_SOCKET_PATH`, and the SOPS decrypt path are genuinely proven; a usable
+Windows product needs Windows Hello implemented first.
+
+The security property behind (1) — owner-only files — also still needs a real expression on
+Windows via ACLs. Both gaps are tracked as open risks in
+`docs/plans/2026-07-26-sops-age-plugin.md`; neither is something a test can assert today.
 
 ### For maintainers: the Formula still omits the plugin
 
