@@ -68,7 +68,9 @@ Build with `make build`, then render and load the plist yourself:
 
 ```sh
 mkdir -p ~/bin ~/Library/Logs/agentvault
-cp bin/av bin/avd ~/bin/
+# age-plugin-av too: age finds plugins by filename on PATH, so leaving it behind
+# breaks SOPS decryption with a confusing error. See docs/sops.md.
+cp bin/av bin/avd bin/age-plugin-av ~/bin/
 
 # absolute avd path; Interactive ProcessType keeps Touch ID presentable
 launchctl bootout gui/$(id -u)/app.bshk.agentvault.avd 2>/dev/null
