@@ -668,8 +668,28 @@ The `av://sops/<file>#<dotted.key>` reader backend. It shells out to `sops -d`, 
 
 **Design hazard to carry forward:** it is re-entrant. `avd` spawns `sops`, which calls back into `avd` for `sops_unwrap`. A handler holding a lock while waiting on the subprocess deadlocks the daemon. Hold no lock across the `exec`.
 
+## Before release — one change lives outside this repository
+
+**The Homebrew Formula must install `age-plugin-av`, and the Formula is not here.**
+
+`brew install beshkenadze/tap/agentvault` — the most-used install path, and the one the
+README leads with — resolves to a Formula in the external tap `beshkenadze/homebrew-tap`.
+This repository contains no `.rb` file, so nothing in this branch can fix it. Task 10
+updated everything that *is* here: the `Makefile`, `scripts/release-signed.sh`, and the
+Cask metadata. Both CI workflows delegate to the release script and name no binary, so
+they need nothing.
+
+Until that tap's `bin.install` names the plugin, a Formula install produces a working
+`av`, a working `avd`, and no plugin — and the failure is `no identity matched` from
+sops, which points at nothing. Shipping without it means shipping the silent break this
+whole feature exists to avoid.
+
 ## Open risks
 
-- **Windows plugin discovery.** Untested. Verify before claiming Windows parity.
+- **Windows plugin discovery.** The Task 1 spike now exercises it when run on Windows,
+  and the Makefile emits `age-plugin-av.exe` there, but no CI job executes tests on
+  Windows — `make cross-test` only compiles. Unverified until someone runs it.
 - **`sops updatekeys` through the plugin.** Should work; confirm in Task 11.
-- **`plugin.ClientUI` in Task 1.** May not accept `nil`. Read `go doc` rather than guessing.
+- **Real `sops`, `helm secrets`, and `kustomize`+ksops.** Everything proven so far runs
+  against the age *library*, plus one manual run of the real `age` binary in Task 10.
+  Task 11 is the first and only place the actual toolchain is exercised.
