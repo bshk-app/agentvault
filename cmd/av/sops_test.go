@@ -213,6 +213,45 @@ func TestFormatSopsListEmpty(t *testing.T) {
 	}
 }
 
+// TestParseSopsNameArg: exactly one positional NAME, nothing else.
+func TestParseSopsNameArg(t *testing.T) {
+	name, err := parseSopsNameArg("av sops recipient", []string{"work"})
+	if err != nil || name != "work" {
+		t.Fatalf("got %q, %v", name, err)
+	}
+	for _, args := range [][]string{nil, {"a", "b"}, {"--tier", "normal", "a"}} {
+		if _, err := parseSopsNameArg("av sops recipient", args); err == nil {
+			t.Fatalf("parseSopsNameArg(%q) accepted bad args", args)
+		}
+	}
+}
+
+// TestSopsShowValue: `recipient` prints the age1… to encrypt to, `identity` prints the
+// AGE-PLUGIN-AV-1… line keys.txt wants — bare, with nothing around it, because the whole
+// point of `av sops identity NAME >> keys.txt` is that its stdout IS the file line.
+func TestSopsShowValue(t *testing.T) {
+	id := sampleInfo("work", "normal")
+	if got := sopsShowValue(sopsFieldRecipient, id); got != sampleRecipient {
+		t.Fatalf("recipient = %q", got)
+	}
+	if got := sopsShowValue(sopsFieldIdentity, id); got != samplePointer {
+		t.Fatalf("identity = %q", got)
+	}
+}
+
+// TestSopsNoSuchIdentityMatchesDaemon pins the client-side "no such identity" to the
+// daemon's spelling. `recipient` and `identity` have no RPC of their own — they read a
+// field out of the sops_list reply — so this condition is produced HERE while the identical
+// condition on `rm` is produced in internal/daemon/sops_manage.go:334 as
+// `fmt.Sprintf("sops %s %q: no such SOPS identity", op, name)`. Two spellings of one
+// condition in two packages, with nothing but this test linking them.
+func TestSopsNoSuchIdentityMatchesDaemon(t *testing.T) {
+	const want = `sops recipient "typo": no such SOPS identity`
+	if got := sopsNoSuchIdentity(sopsFieldRecipient, "typo").Error(); got != want {
+		t.Fatalf("sopsNoSuchIdentity = %q, want %q", got, want)
+	}
+}
+
 // TestParseSopsVersion covers the shapes `sops --version` actually prints: bare, with the
 // " (latest)" suffix the online version check adds, and a "v"-prefixed build.
 func TestParseSopsVersion(t *testing.T) {

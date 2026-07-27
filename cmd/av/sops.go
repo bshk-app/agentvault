@@ -36,6 +36,10 @@ func runSops(args []string) {
 		runSopsKeygen(args[1:])
 	case "ls":
 		runSopsLs(args[1:])
+	case "recipient":
+		runSopsShow(args[1:], sopsFieldRecipient)
+	case "identity":
+		runSopsShow(args[1:], sopsFieldIdentity)
 	default:
 		fmt.Fprintf(os.Stderr, "av: unknown sops command %q\n", args[0])
 		sopsUsage()
@@ -44,7 +48,7 @@ func runSops(args []string) {
 }
 
 func sopsUsage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av sops keygen NAME [--tier normal|dangerous]  (generate a SOPS identity inside the vault)\n  av sops ls")
+	fmt.Fprintln(os.Stderr, "usage:\n  av sops keygen NAME [--tier normal|dangerous]  (generate a SOPS identity inside the vault)\n  av sops ls\n  av sops recipient NAME  (the age1… to encrypt to — put it in .sops.yaml)\n  av sops identity NAME   (the AGE-PLUGIN-AV-1… pointer — put it in keys.txt)")
 }
 
 // sopsKeygenOptions are the parsed args of `av sops keygen`.
@@ -154,6 +158,76 @@ func formatSopsList(ids []ipc.SopsIdentityInfo) string {
 		fmt.Fprintf(&b, "%-*s  %-9s  %s\n", width, id.Name, id.Tier, id.Recipient)
 	}
 	return b.String()
+}
+
+// sopsShowField selects which half of a listed identity `av sops recipient` and
+// `av sops identity` print. Its VALUE is the subcommand's own name, so the "no such
+// identity" message below reads as the command the user typed without a second table
+// mapping one to the other.
+type sopsShowField string
+
+const (
+	sopsFieldRecipient sopsShowField = "recipient"
+	sopsFieldIdentity  sopsShowField = "identity"
+)
+
+// runSopsShow implements `av sops recipient NAME` and `av sops identity NAME`. Neither has
+// an RPC of its own: sops_list already returns both strings for every identity, so these are
+// printers over that reply — which is why the "no such identity" case is decided here.
+//
+// stdout carries the value and NOTHING else (warnings go to stderr), because the documented
+// use of `identity` is `av sops identity work >> keys.txt`: its stdout IS the file line.
+func runSopsShow(args []string, field sopsShowField) {
+	name, err := parseSopsNameArg("av sops "+string(field), args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		sopsUsage()
+		os.Exit(exitBadRequest)
+	}
+	ids, err := dialClient().SopsList()
+	if err != nil {
+		os.Exit(exitForError(err))
+	}
+	id, ok := findSopsIdentity(ids, name)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "av:", sopsNoSuchIdentity(field, name))
+		os.Exit(exitBadRequest)
+	}
+	fmt.Println(sopsShowValue(field, id))
+}
+
+// sopsShowValue reads the requested field off a listed identity. Both are PUBLIC: the
+// recipient is a public key, and the pointer carries that same recipient — without a running
+// avd and a presence check it decrypts nothing, which is what makes it safe to commit.
+func sopsShowValue(field sopsShowField, id ipc.SopsIdentityInfo) string {
+	if field == sopsFieldIdentity {
+		return id.Identity
+	}
+	return id.Recipient
+}
+
+// sopsNoSuchIdentity is the client-side "no such identity", and its wording is the daemon's
+// by hand: internal/daemon/sops_manage.go answers the identical condition on `sops rm` with
+// `sops %s %q: no such SOPS identity`. Nothing links the two but the test that pins this —
+// the daemon's copy lives behind filippo.io/age, which av must not link (TestAvStaysThin).
+//
+// The exit code matches too: the daemon returns CodeBadRequest for this, which exitForError
+// maps to exit 2, and the callers of this error exit 2 directly.
+func sopsNoSuchIdentity(field sopsShowField, name string) error {
+	return fmt.Errorf("sops %s %q: no such SOPS identity", field, name)
+}
+
+// parseSopsNameArg extracts the single positional NAME for the sops subcommands that take
+// nothing else. A flag-looking argument is refused rather than swallowed as a name, so a
+// mistyped flag is reported instead of creating a lookup for "--tier".
+func parseSopsNameArg(cmd string, args []string) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("%s needs exactly one NAME (use: %s NAME)", cmd, cmd)
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return "", fmt.Errorf("%s: unexpected flag %q", cmd, args[0])
+	}
+	return args[0], nil
 }
 
 // sopsCheckReplace runs the SopsList-then-confirm dance shared by keygen and import, and
