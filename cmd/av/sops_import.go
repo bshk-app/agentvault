@@ -75,7 +75,11 @@ func parseSopsImportArgs(args []string) (sopsImportOptions, error) {
 		case strings.HasPrefix(a, "--name="):
 			o.name = strings.TrimPrefix(a, "--name=")
 		default:
-			return o, fmt.Errorf("unexpected argument %q (use: av sops import [--from PATH] [--name NAME])", a)
+			// The argument is NOT echoed. `av sops import AGE-SECRET-KEY-1…` is the exact
+			// mistake this branch is here to catch, and quoting it back would put the private
+			// key in stderr, in the scrollback and in whatever CI captured the run — the one
+			// thing this file promises never to do.
+			return o, fmt.Errorf("av sops import takes no positional arguments; an existing key is read from a file, never from argv (use: av sops import [--from PATH] [--name NAME])")
 		}
 	}
 	return o, nil
@@ -132,10 +136,15 @@ func runSopsImport(args []string) {
 	names := sopsImportNames(base, len(keys))
 	// Reported BEFORE anything is touched, per the plan: the user sees which file is about
 	// to be rewritten and under which names its keys will land.
-	fmt.Printf("found %d age %s in %s\n  importing as: %s\n", len(keys), plural(len(keys), "key", "keys"), src, strings.Join(names, ", "))
+	//
+	// On STDERR, with the prompts it is the context for. `av sops import > log` otherwise
+	// shows a bare "Replace it? Type 'yes' to continue:" with no indication of which file or
+	// which names — a question about destroying a key, asked without saying which key.
+	fmt.Fprintf(os.Stderr, "found %d age %s in %s\n  importing as: %s\n", len(keys), plural(len(keys), "key", "keys"), src, strings.Join(names, ", "))
 
 	c := dialClient()
-	sopsCheckReplace(c, names) // exits when a name is taken and the user declines
+	// Exits when a name is taken and the user declines.
+	sopsCheckReplace(c, names, stdinIsTTY(), os.Stdin, os.Stderr)
 
 	keepBackup := askSopsBackup(os.Stdin, os.Stderr, stdinIsTTY(), source.path)
 
@@ -146,7 +155,10 @@ func runSopsImport(args []string) {
 		// back — this is recoverable, and a user who reads "failed" and re-imports from a
 		// half-written file has a much worse day.
 		fmt.Fprintln(os.Stderr, "av:", err)
-		fmt.Fprintf(os.Stderr, "av: the keys ARE in the vault — rebuild the file with: av sops identity NAME >> %q\n", source.path)
+		// Asked rather than assumed from keepBackup: the backup is written first, so it is
+		// on disk whenever the RENAME is what failed, and absent when the backup write was.
+		_, bakErr := os.Lstat(source.path + sopsBackupSuffix)
+		fmt.Fprint(os.Stderr, sopsRewriteFailureHint(source.path, names, bakErr == nil))
 		os.Exit(exitGeneric)
 	case err != nil:
 		reportSopsImportFailure(source.path, names, stored)
@@ -215,14 +227,39 @@ func sopsSourceFile(from string, candidates []string) (string, error) {
 		if fi.IsDir() {
 			return "", fmt.Errorf("--from %q is a directory (name the keys.txt inside it)", from)
 		}
-		return from, nil
+		return sopsResolveSource(from)
 	}
 	for _, p := range candidates {
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-			return p, nil
+			return sopsResolveSource(p)
 		}
 	}
 	return "", nil
+}
+
+// sopsResolveSource follows a SYMLINKED keys.txt to the file its bytes actually live in.
+//
+// Reading and rewriting disagree about symlinks, and the disagreement is the whole bug:
+// os.ReadFile follows one, while the tmp+rename in writeSopsPointerFile replaces the LINK
+// with a regular file. A dotfiles setup — chezmoi and stow are common enough that this is a
+// population, not a corner — whose ~/.config/sops/age/keys.txt links into a repo would end up
+// with the pointer file where the link was and the PLAINTEXT KEY still in the repo, named by
+// nothing this command printed and possibly committed. Resolving first makes the file that is
+// read, backed up, rewritten and reported one single file, and leaves the link pointing at it.
+//
+// Only a symlinked FINAL COMPONENT is resolved. A symlinked directory along the way needs no
+// help — the rename happens inside the real directory either way — and normalizing those would
+// rewrite every path this command prints (/var → /private/var on darwin) to no purpose.
+func sopsResolveSource(path string) (string, error) {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return path, nil
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("%s is a symlink that does not resolve: %v", path, err)
+	}
+	return resolved, nil
 }
 
 // scanSopsKeysFile splits a keys.txt into the private keys to import and the plugin pointers
@@ -403,6 +440,33 @@ func writeSopsPointerFile(path, content string, original []byte, keepBackup bool
 	return nil
 }
 
+// sopsRewriteFailureHint describes what is ACTUALLY on disk when the store succeeded and the
+// rewrite did not, and how to finish the job by hand.
+//
+// The obvious one-liner ("rebuild the file with: av sops identity NAME >> path") gets both
+// halves wrong. The file was not replaced, so it still holds the PLAINTEXT KEYS — appending
+// pointers leaves a file with both, which is not a rebuild. And writeSopsPointerFile writes
+// the backup BEFORE the rename, so a rename that failed leaves a SECOND plaintext copy at
+// <path>.bak. Naming every copy it did not delete is the rule formatSopsImportDone follows;
+// the failure path does not get an exemption from it.
+func sopsRewriteFailureHint(src string, names []string, backupOnDisk bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "the keys ARE in the vault, but %s was NOT replaced — it still holds the PLAINTEXT %s.\n", src, plural(len(names), "KEY", "KEYS"))
+	fmt.Fprintf(&b, "rebuild it by REPLACING its contents — appending would leave the %s in the file:\n", plural(len(names), "key", "keys"))
+	for i, n := range names {
+		redirect := ">"
+		if i > 0 {
+			redirect = ">>"
+		}
+		fmt.Fprintf(&b, "  av sops identity %s %s %q\n", n, redirect, src)
+	}
+	if backupOnDisk {
+		fmt.Fprintf(&b, "%s%s holds the plaintext %s too — that is TWO copies on disk; delete both once sops can decrypt with the pointers.\n",
+			src, sopsBackupSuffix, plural(len(names), "key", "keys"))
+	}
+	return b.String()
+}
+
 // formatSopsImportDone is the summary. It names every identity that landed, the file that
 // now points at them, and — when a backup was kept — that the PLAINTEXT KEY is still sitting
 // in it. "It never deletes a key silently" has a second half: the copy it did not delete has
@@ -437,16 +501,32 @@ func plural(n int, one, many string) string {
 func sopsAgeKeyEnvSet() bool    { return os.Getenv("SOPS_AGE_KEY") != "" }
 func sopsAgeKeyCmdEnvSet() bool { return os.Getenv("SOPS_AGE_KEY_CMD") != "" }
 
-// warnSopsEnvShadow warns, after a successful import, that sops will keep using the key in
-// the environment. The pointer is now in place and everything still decrypts — with the old
-// key, never exercising the plugin — so without this the import looks like it worked and did
-// nothing.
+// warnSopsEnvShadow warns, after an identity is in place, that sops will keep using the key
+// in the environment. Everything still decrypts — with the old key, never exercising the
+// plugin — so without this the command looks like it worked and did nothing.
+//
+// BOTH commands that put an identity in the vault call it. `av sops import` needs it because
+// the pointer it just wrote is shadowed; `av sops keygen` needs it because the summary it
+// just printed tells the user to append that pointer to keys.txt, and following that
+// instruction under SOPS_AGE_KEY changes nothing at all.
 func warnSopsEnvShadow() {
-	for _, name := range []string{"SOPS_AGE_KEY", "SOPS_AGE_KEY_CMD"} {
-		if os.Getenv(name) != "" {
-			fmt.Fprintf(os.Stderr, "WARNING: %s is set — sops reads that key too and will keep using it. Unset it (and remove it from your shell profile) or the pointer is never used.\n", name)
-		}
+	fmt.Fprint(os.Stderr, sopsEnvShadowWarning(sopsAgeKeyEnvSet(), sopsAgeKeyCmdEnvSet()))
+}
+
+// sopsEnvShadowWarning renders the warning for whichever variables are set, or "" for none.
+//
+// SECURITY: booleans, not values, for the reason sopsNothingFoundMessage takes booleans —
+// SOPS_AGE_KEY holds a private key outright, and a function never handed one cannot print one.
+func sopsEnvShadowWarning(hasAgeKey, hasAgeKeyCmd bool) string {
+	const warn = "WARNING: %s is set — sops reads that key too and will keep using it. Unset it (and remove it from your shell profile) or the pointer is never used.\n"
+	var b strings.Builder
+	if hasAgeKey {
+		fmt.Fprintf(&b, warn, "SOPS_AGE_KEY")
 	}
+	if hasAgeKeyCmd {
+		fmt.Fprintf(&b, warn, "SOPS_AGE_KEY_CMD")
+	}
+	return b.String()
 }
 
 // sopsNothingFoundMessage explains that no keys.txt was found — which is NOT the same as
@@ -459,19 +539,24 @@ func warnSopsEnvShadow() {
 // SECURITY: it takes booleans, not values. The shell lines it prints expand $SOPS_AGE_KEY
 // and $SOPS_AGE_KEY_CMD at the user's own prompt, so a private key in either variable is
 // never read by av, never printed, and never in a terminal scrollback because of this.
+//
+// Both lines write through `(umask 077; … > FILE)`. A bare `>` creates the file at the
+// user's umask — 0644 on most systems — which is a world-readable private key, and this
+// command is the one telling them to create it. writeSopsPointerFile makes the same repair
+// on the file it rewrites for the same reason.
 func sopsNothingFoundMessage(candidates []string, hasAgeKey, hasAgeKeyCmd bool, keysPath string) string {
 	var b strings.Builder
 	if hasAgeKey || hasAgeKeyCmd {
 		if hasAgeKey {
 			fmt.Fprintf(&b, "no keys.txt to import, but SOPS_AGE_KEY is set — sops reads your key from that variable, not from a file, so there is nothing on disk to find.\n")
 			fmt.Fprintf(&b, "to import it, put it where sops keeps keys and import that file:\n")
-			fmt.Fprintf(&b, "  mkdir -p %q && printf '%%s\\n' \"$SOPS_AGE_KEY\" > %q\n  av sops import\n", filepath.Dir(keysPath), keysPath)
+			fmt.Fprintf(&b, "  mkdir -p %q && (umask 077; printf '%%s\\n' \"$SOPS_AGE_KEY\" > %q)\n  av sops import\n", filepath.Dir(keysPath), keysPath)
 			fmt.Fprintf(&b, "then unset SOPS_AGE_KEY (and remove it from your shell profile): while it is set, sops keeps using that key and the pointer is never exercised.\n")
 		}
 		if hasAgeKeyCmd {
 			fmt.Fprintf(&b, "no keys.txt to import, but SOPS_AGE_KEY_CMD is set — sops gets your key by running that command, so there is nothing on disk to find.\n")
 			fmt.Fprintf(&b, "to import it, write what it prints where sops keeps keys and import that file:\n")
-			fmt.Fprintf(&b, "  mkdir -p %q && sh -c \"$SOPS_AGE_KEY_CMD\" > %q\n  av sops import\n", filepath.Dir(keysPath), keysPath)
+			fmt.Fprintf(&b, "  mkdir -p %q && (umask 077; sh -c \"$SOPS_AGE_KEY_CMD\" > %q)\n  av sops import\n", filepath.Dir(keysPath), keysPath)
 			fmt.Fprintf(&b, "then unset SOPS_AGE_KEY_CMD (and remove it from your shell profile): while it is set, sops keeps using that key and the pointer is never exercised.\n")
 		}
 		fmt.Fprintf(&b, "(no keys.txt at %s either, which is expected with that set.)\n", strings.Join(candidates, ", "))

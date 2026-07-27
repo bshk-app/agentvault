@@ -45,6 +45,74 @@ func TestParseSopsImportArgs(t *testing.T) {
 	}
 }
 
+// TestParseSopsImportArgsDoesNotEchoTheArgument: `av sops import AGE-SECRET-KEY-1…` is the
+// likeliest way to reach this branch — someone reaching for the shape `av add NAME VALUE`
+// has — and the refusal must not quote what it refused. This file's whole contract is that
+// key material is never logged, never echoed and never placed in an error; a usage message
+// that prints the key to stderr, the scrollback and whatever CI captured the run breaks it
+// at the exact moment a user has made the mistake it exists to survive.
+func TestParseSopsImportArgsDoesNotEchoTheArgument(t *testing.T) {
+	_, err := parseSopsImportArgs([]string{sampleKey})
+	if err == nil {
+		t.Fatal("a positional argument must be refused")
+	}
+	if strings.Contains(err.Error(), sampleKey) || strings.Contains(err.Error(), "AGE-SECRET-KEY") {
+		t.Fatalf("the refusal echoed key material: %v", err)
+	}
+	// It still has to say what to do instead.
+	for _, want := range []string{"--from", "av sops import"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal missing %q: %v", want, err)
+		}
+	}
+}
+
+// TestSopsSourceFileResolvesSymlink is the dotfiles hazard, pinned.
+//
+// os.ReadFile follows a symlinked keys.txt; the tmp+rename that rewrites it REPLACES the
+// link with a regular file. A chezmoi or stow user whose ~/.config/sops/age/keys.txt links
+// into a repo would therefore get the pointer file where the link was and keep the PLAINTEXT
+// KEY in the repo — a copy this command never named and may well have left staged for
+// commit. Resolving the link first makes read, backup, rewrite and report all one file.
+func TestSopsSourceFileResolvesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := writeFile(t, dir, "dotfiles-keys.txt", sampleKey+"\n")
+	link := filepath.Join(dir, "keys.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks are not available here: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both routes to a source file resolve: --from and the candidate search.
+	for _, got := range []func() (string, error){
+		func() (string, error) { return sopsSourceFile(link, nil) },
+		func() (string, error) { return sopsSourceFile("", []string{link}) },
+	} {
+		src, err := got()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if src != want {
+			t.Fatalf("source = %q, want the symlink's target %q", src, want)
+		}
+	}
+}
+
+// TestSopsSourceFileLeavesRealFilesAlone: only a symlinked FINAL component is resolved. A
+// symlinked directory in the path needs no help — the rename lands inside the real directory
+// either way — and normalizing those would rewrite every path this command prints.
+func TestSopsSourceFileLeavesRealFilesAlone(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "keys.txt", sampleKey+"\n")
+	got, err := sopsSourceFile(path, nil)
+	if err != nil || got != path {
+		t.Fatalf("sopsSourceFile(%q) = %q, %v; a real file's path must be reported as given", path, got, err)
+	}
+}
+
 // TestSopsSourceFilePrefersFrom: --from wins over every candidate, and a --from that is not
 // there is an error rather than a silent fall back to a candidate. Falling back would import
 // a file the user did not name and rewrite it.
@@ -321,6 +389,77 @@ func TestFormatSopsImportDone(t *testing.T) {
 	}
 	if strings.Contains(formatSopsImportDone("/k.txt", infos, false), sopsBackupSuffix) {
 		t.Fatal("no backup was kept; the summary must not mention one")
+	}
+}
+
+// TestSopsRewriteFailureHintDescribesWhatIsOnDisk: after a successful store and a failed
+// rewrite, the file was NOT replaced — it still holds the plaintext keys. The hint has to say
+// so and has to REPLACE the file, because the obvious `>> keys.txt` would leave a file
+// holding both the pointers and the keys they were supposed to remove.
+func TestSopsRewriteFailureHintDescribesWhatIsOnDisk(t *testing.T) {
+	hint := sopsRewriteFailureHint("/k.txt", []string{"work"}, false)
+	for _, want := range []string{"/k.txt", "PLAINTEXT", "NOT replaced", "REPLACING", `av sops identity work > "/k.txt"`} {
+		if !strings.Contains(hint, want) {
+			t.Fatalf("hint missing %q:\n%s", want, hint)
+		}
+	}
+	if strings.Contains(hint, sopsBackupSuffix) {
+		t.Fatalf("no backup is on disk; the hint must not claim one:\n%s", hint)
+	}
+}
+
+// TestSopsRewriteFailureHintNamesTheBackup: writeSopsPointerFile writes the backup BEFORE the
+// rename, so a rename that failed leaves a SECOND plaintext copy at <path>.bak. "It never
+// deletes a key silently" has a second half — every copy it did not delete has to be named —
+// and the failure path does not get an exemption from it.
+func TestSopsRewriteFailureHintNamesTheBackup(t *testing.T) {
+	hint := sopsRewriteFailureHint("/k.txt", []string{"a", "b"}, true)
+	for _, want := range []string{"/k.txt" + sopsBackupSuffix, "TWO copies"} {
+		if !strings.Contains(hint, want) {
+			t.Fatalf("hint missing %q:\n%s", want, hint)
+		}
+	}
+	// Several identities: the first line replaces the file, the rest append to it.
+	if !strings.Contains(hint, `av sops identity a > "/k.txt"`) || !strings.Contains(hint, `av sops identity b >> "/k.txt"`) {
+		t.Fatalf("a multi-key rebuild must truncate once and then append:\n%s", hint)
+	}
+}
+
+// TestSopsEnvShadowWarning: each variable is warned about only when it is set, and a clean
+// environment says nothing. `av sops keygen` and `av sops import` both end here — the pointer
+// they put in place is inert while sops is reading a key out of the environment.
+func TestSopsEnvShadowWarning(t *testing.T) {
+	if got := sopsEnvShadowWarning(false, false); got != "" {
+		t.Fatalf("nothing is set; want no warning, got %q", got)
+	}
+	key := sopsEnvShadowWarning(true, false)
+	if !strings.Contains(key, "SOPS_AGE_KEY is set") || strings.Contains(key, "SOPS_AGE_KEY_CMD") {
+		t.Fatalf("warning should name only SOPS_AGE_KEY:\n%s", key)
+	}
+	cmd := sopsEnvShadowWarning(false, true)
+	if !strings.Contains(cmd, "SOPS_AGE_KEY_CMD is set") {
+		t.Fatalf("warning should name SOPS_AGE_KEY_CMD:\n%s", cmd)
+	}
+	both := sopsEnvShadowWarning(true, true)
+	if strings.Count(both, "WARNING:") != 2 {
+		t.Fatalf("both variables set should warn about both:\n%s", both)
+	}
+	// The warning is useless without the fix, and the fix is not just `unset` in this shell.
+	if !strings.Contains(key, "shell profile") {
+		t.Fatalf("warning should say where the variable is really coming from:\n%s", key)
+	}
+}
+
+// TestSopsNothingFoundWritesTheKeyPrivately: the advice tells the user to write a PRIVATE KEY
+// to a file, and a bare `>` creates it at their umask — 0644 on most systems. Everything else
+// on this path is careful about exactly that (writeSopsPointerFile repairs the mode of the
+// file it rewrites), so the one line that creates a key file must not be the careless one.
+func TestSopsNothingFoundWritesTheKeyPrivately(t *testing.T) {
+	for _, tc := range []struct{ hasKey, hasCmd bool }{{true, false}, {false, true}} {
+		msg := sopsNothingFoundMessage([]string{"/a/keys.txt"}, tc.hasKey, tc.hasCmd, "/a/keys.txt")
+		if !strings.Contains(msg, "umask 077") {
+			t.Fatalf("the key-writing advice must not leave the file at the user's umask:\n%s", msg)
+		}
 	}
 }
 

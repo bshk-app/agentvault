@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 
@@ -52,6 +55,27 @@ func TestParseSopsKeygenArgsErrors(t *testing.T) {
 	} {
 		if _, err := parseSopsKeygenArgs(args); err == nil {
 			t.Fatalf("parseSopsKeygenArgs(%q) = nil error, want a usage error", args)
+		}
+	}
+}
+
+// TestParseSopsKeygenArgsRefusesFlags is the guard that keeps a typo from becoming permanent.
+//
+// Without it `av sops keygen --dry-run` GENERATES a key and stores it under the name
+// "--dry-run" — the daemon's name rule refuses only an empty name and a slash — and from
+// then on nothing can reach it: `av sops rm --dry-run`, `recipient` and `identity` all parse
+// it as a flag, and `av rm sops/--dry-run` is refused by the reserved-namespace guard. The
+// entry sits in `av sops ls` forever. A mistyped flag must be an error, never a name.
+func TestParseSopsKeygenArgsRefusesFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"--dry-run"},
+		{"-n"},
+		{"--force"},
+		{"work", "--dry-run"},
+		{"--dry-run", "--tier", "normal"},
+	} {
+		if o, err := parseSopsKeygenArgs(args); err == nil {
+			t.Fatalf("parseSopsKeygenArgs(%q) accepted a flag as NAME %q", args, o.name)
 		}
 	}
 }
@@ -278,6 +302,44 @@ func TestParseSopsRmArgs(t *testing.T) {
 	}
 }
 
+// TestParseSopsRmArgsEndOfFlags: `--` ends the flags, so a NAME that starts with a dash is
+// removable. rm is the only sops subcommand that takes `--`, and it takes it because it is
+// the only one that can clear such an entry: `av sops import --name -x` still creates one by
+// definition (--name takes the value it is given), and `av rm sops/-x` is refused by the
+// reserved-namespace guard. Without this, that entry would be listed forever and deletable
+// by nothing.
+func TestParseSopsRmArgsEndOfFlags(t *testing.T) {
+	for _, tc := range []struct {
+		args  []string
+		name  string
+		force bool
+	}{
+		{[]string{"--", "--dry-run"}, "--dry-run", false},
+		{[]string{"--force", "--", "-x"}, "-x", true},
+		{[]string{"--", "--force"}, "--force", false}, // after --, even a real flag is a name
+		{[]string{"--", "--"}, "--", false},
+	} {
+		o, err := parseSopsRmArgs(tc.args)
+		if err != nil {
+			t.Fatalf("parseSopsRmArgs(%q): %v", tc.args, err)
+		}
+		if o.name != tc.name || o.force != tc.force {
+			t.Fatalf("parseSopsRmArgs(%q) = %+v, want name=%q force=%v", tc.args, o, tc.name, tc.force)
+		}
+	}
+	// A bare `--` names nothing, and two positionals after it are still two positionals.
+	for _, args := range [][]string{{"--"}, {"--", "a", "b"}} {
+		if _, err := parseSopsRmArgs(args); err == nil {
+			t.Fatalf("parseSopsRmArgs(%q) accepted bad args", args)
+		}
+	}
+	// The refusal has to name the escape, or it is a dead end with a way out nobody knows.
+	_, err := parseSopsRmArgs([]string{"--dry-run"})
+	if err == nil || !strings.Contains(err.Error(), "av sops rm -- NAME") {
+		t.Fatalf("the unexpected-flag refusal should name the -- escape: %v", err)
+	}
+}
+
 // TestSopsRemoveTarget: the prompt names the tier and recipient when the listing knew the
 // identity, and falls back to the bare name when it did not — a corrupt entry that breaks
 // `av sops ls` must still be removable, so the prompt has to work without a listing.
@@ -379,6 +441,124 @@ func TestSopsVersionNote(t *testing.T) {
 			t.Fatalf("sopsVersionNote(%q) = %q, want no warning", out, note)
 		}
 	}
+}
+
+// fakeLister is the sopsLister seam: the sops_list half of *client.Client, which is all the
+// replace check needs. Every identity in a listing already carries its recipient and its
+// pointer, so no part of this surface has an RPC of its own.
+type fakeLister struct {
+	ids   []ipc.SopsIdentityInfo
+	calls int
+}
+
+func (f *fakeLister) SopsList() ([]ipc.SopsIdentityInfo, error) {
+	f.calls++
+	return f.ids, nil
+}
+
+// TestSopsCheckReplaceDecidesTheVerb covers both outcomes of the check `av sops keygen` and
+// `av sops import` open with, and the word keygen prints because of it.
+//
+// The "replaced" branch is only reachable with a terminal — a taken name without one is
+// refused outright — which is why the terminal and its streams are parameters. A test has no
+// terminal, so before that seam existed this function could only ever return "created".
+func TestSopsCheckReplaceDecidesTheVerb(t *testing.T) {
+	stored := []ipc.SopsIdentityInfo{sampleInfo("work", "dangerous")}
+
+	// A free name: no prompt, no output, a create.
+	c := &fakeLister{ids: stored}
+	var out bytes.Buffer
+	if replacing := sopsCheckReplace(c, []string{"fresh"}, false, strings.NewReader(""), &out); replacing {
+		t.Fatal("a name nobody stored is a create")
+	}
+	if c.calls != 1 {
+		t.Fatalf("SopsList calls = %d, want exactly 1", c.calls)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("the common case must not print anything: %q", out.String())
+	}
+	if got := sopsWriteVerb(false); got != "created" {
+		t.Fatalf("verb = %q, want created", got)
+	}
+
+	// A taken name, confirmed at a terminal: a replace, and the user was told what dies.
+	out.Reset()
+	if replacing := sopsCheckReplace(c, []string{"work"}, true, strings.NewReader("yes\n"), &out); !replacing {
+		t.Fatal("a name that is already stored is a replace")
+	}
+	for _, want := range []string{"work", "dangerous", "unreadable", "Replace it?"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("the replace prompt is missing %q:\n%s", want, out.String())
+		}
+	}
+	if got := sopsWriteVerb(true); got != "replaced" {
+		t.Fatalf("verb = %q, want replaced", got)
+	}
+	// Both words reach the user through the same summary.
+	for _, verb := range []string{"created", "replaced"} {
+		if !strings.Contains(formatSopsCreated(verb, sampleInfo("work", "normal"), "/k.txt"), verb) {
+			t.Fatalf("formatSopsCreated dropped the verb %q", verb)
+		}
+	}
+}
+
+// TestSopsCheckReplaceChecksEveryName: import stores several keys at once, and ONE taken name
+// among them is a replace — anything less would let a multi-key import destroy a stored
+// identity while reporting that it created one.
+func TestSopsCheckReplaceChecksEveryName(t *testing.T) {
+	c := &fakeLister{ids: []ipc.SopsIdentityInfo{sampleInfo("imported-2", "normal")}}
+	var out bytes.Buffer
+	if !sopsCheckReplace(c, []string{"imported-1", "imported-2"}, true, strings.NewReader("yes\n"), &out) {
+		t.Fatal("a taken name anywhere in the list is a replace")
+	}
+}
+
+// TestSopsWarnsAboutEnvShadowOnEveryPath pins the CALL SITES of warnSopsEnvShadow. Both
+// commands end in a dialClient()'d RPC, so neither runSops* function can be exercised without
+// a daemon, and the call site is the only thing left that a test can reach.
+//
+// It is worth reaching. `av sops keygen` shipped without the call, and what that lets through
+// is precisely the failure this whole feature exists to prevent: the summary tells the user
+// to append the pointer to keys.txt, and with SOPS_AGE_KEY set sops goes on decrypting with
+// the old key, the plugin is never exercised, and every command involved reports success.
+func TestSopsWarnsAboutEnvShadowOnEveryPath(t *testing.T) {
+	for _, tc := range []struct{ file, fn string }{
+		{"sops.go", "runSopsKeygen"},
+		{"sops_import.go", "runSopsImport"},
+	} {
+		if !funcCallsFunc(t, tc.file, tc.fn, "warnSopsEnvShadow") {
+			t.Errorf("%s does not call warnSopsEnvShadow: a user with SOPS_AGE_KEY set gets a success message and an identity sops never uses", tc.fn)
+		}
+	}
+}
+
+// funcCallsFunc reports whether the named function in file contains a call to want. It fails
+// the test outright when the function is not there, so a rename cannot turn this into a
+// vacuous pass.
+func funcCallsFunc(t *testing.T, file, fn, want string) bool {
+	t.Helper()
+	parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range parsed.Decls {
+		decl, ok := d.(*ast.FuncDecl)
+		if !ok || decl.Name.Name != fn {
+			continue
+		}
+		found := false
+		ast.Inspect(decl.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == want {
+					found = true
+				}
+			}
+			return !found
+		})
+		return found
+	}
+	t.Fatalf("%s has no func %s — this test is guarding a call site that no longer exists", file, fn)
+	return false
 }
 
 // TestConfirmSopsReplaceRefusesWithoutTTY: with no terminal there is nobody to warn, so a

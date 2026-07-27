@@ -66,6 +66,12 @@ type sopsKeygenOptions struct {
 // parseAddArgs refuses one: `av sops keygen NAME AGE-SECRET-KEY-1…` would be a private key
 // on argv, and importing an existing key is `av sops import`, which reads it from a file.
 //
+// A flag-looking argument is refused rather than swallowed as a NAME, exactly as
+// parseSopsNameArg and parseSopsRmArgs refuse one — and here it is the load-bearing guard of
+// the three. Without it `av sops keygen --dry-run` GENERATES a key stored under the name
+// "--dry-run" (the daemon's ValidateName has no opinion about a leading dash), and every
+// command that could reach it back — rm, recipient, identity — parses that name as a flag.
+//
 // The tier is NOT validated here — see the file header.
 func parseSopsKeygenArgs(args []string) (sopsKeygenOptions, error) {
 	var o sopsKeygenOptions
@@ -81,6 +87,8 @@ func parseSopsKeygenArgs(args []string) (sopsKeygenOptions, error) {
 			i++
 		case strings.HasPrefix(a, "--tier="):
 			o.tier = strings.TrimPrefix(a, "--tier=")
+		case strings.HasPrefix(a, "-"):
+			return o, fmt.Errorf("av sops keygen: unexpected flag %q", a)
 		default:
 			if have {
 				return o, fmt.Errorf("av sops keygen takes exactly one NAME; an existing key is imported from a file with `av sops import`, never as an argument")
@@ -101,6 +109,13 @@ func parseSopsKeygenArgs(args []string) (sopsKeygenOptions, error) {
 //
 // It lists first so a name that is already taken is announced as the destruction it is
 // (see confirmSopsReplace); the daemon replaces without asking anything a human can read.
+//
+// It ends with warnSopsEnvShadow for the same reason `av sops import` does, and the case is
+// if anything stronger here: the summary it just printed tells the user to append the pointer
+// to keys.txt, and with SOPS_AGE_KEY set that instruction changes nothing — sops keeps
+// decrypting with the key in the environment, the plugin is never exercised, and this command
+// reported success. That silent success on the path this command RECOMMENDS is the exact
+// failure the whole feature exists to prevent.
 func runSopsKeygen(args []string) {
 	o, err := parseSopsKeygenArgs(args)
 	if err != nil {
@@ -111,22 +126,22 @@ func runSopsKeygen(args []string) {
 	warnOldSops()
 
 	c := dialClient()
-	verb := "created"
-	if replacing := sopsCheckReplace(c, []string{o.name}); replacing {
-		verb = "replaced"
-	}
+	verb := sopsWriteVerb(sopsCheckReplace(c, []string{o.name}, stdinIsTTY(), os.Stdin, os.Stderr))
 	info, err := c.SopsKeygen(o.name, o.tier)
 	if err != nil {
 		os.Exit(exitForError(err))
 	}
 	fmt.Print(formatSopsCreated(verb, info, config.SopsKeysFilePath()))
+	warnSopsEnvShadow()
 }
 
 // runSopsLs implements `av sops ls`: every stored identity, sorted by name (the daemon
 // sorts, so repeated runs over an unchanged vault do not reshuffle).
 func runSopsLs(args []string) {
 	if len(args) > 0 {
-		fmt.Fprintf(os.Stderr, "av: av sops ls takes no arguments (got %q)\n", args[0])
+		// The stray argument is NOT echoed: a mistyped `av sops ls AGE-SECRET-KEY-1…` would
+		// otherwise put a private key in stderr and in whatever captured it.
+		fmt.Fprintln(os.Stderr, "av: av sops ls takes no arguments")
 		os.Exit(exitBadRequest)
 	}
 	ids, err := dialClient().SopsList()
@@ -170,23 +185,37 @@ type sopsRmOptions struct {
 	force bool
 }
 
-// parseSopsRmArgs extracts NAME and the optional --force from `av sops rm NAME [--force]`.
+// parseSopsRmArgs extracts NAME and the optional --force from
+// `av sops rm [--force] [--] NAME`.
+//
+// `--` ends the flags, and rm is the ONLY sops subcommand that takes it. That is not
+// symmetry for its own sake: `av sops import --name -x` still stores an identity whose name
+// begins with a dash (--name takes whatever value it is given, by definition), and `av rm
+// sops/-x` is refused by the reserved-namespace guard, so without an escape here such an
+// entry would be listed forever and removable by nothing. rm already carries that role for
+// the other unreachable entry — the one too corrupt for `av sops ls` to decode — so the way
+// out lives where the way out already lives.
 func parseSopsRmArgs(args []string) (sopsRmOptions, error) {
 	var o sopsRmOptions
-	have := false
+	have, literal := false, false
 	for _, a := range args {
-		switch {
-		case a == "--force":
-			o.force = true
-		case strings.HasPrefix(a, "-"):
-			return o, fmt.Errorf("av sops rm: unexpected flag %q", a)
-		default:
-			if have {
-				return o, fmt.Errorf("av sops rm takes exactly one NAME")
+		if !literal {
+			switch {
+			case a == "--":
+				literal = true
+				continue
+			case a == "--force":
+				o.force = true
+				continue
+			case strings.HasPrefix(a, "-"):
+				return o, fmt.Errorf("av sops rm: unexpected flag %q (for a NAME that starts with a dash, use: av sops rm -- NAME)", a)
 			}
-			o.name = a
-			have = true
 		}
+		if have {
+			return o, fmt.Errorf("av sops rm takes exactly one NAME")
+		}
+		o.name = a
+		have = true
 	}
 	if !have {
 		return o, fmt.Errorf("av sops rm needs a NAME (use: av sops rm NAME [--force])")
@@ -344,14 +373,18 @@ func parseSopsNameArg(cmd string, args []string) (string, error) {
 // whole command guards against. The dead end that would leave (a corrupt entry breaks
 // List for everything) has a documented exit, which the message names: `av sops rm` works
 // on entries that will not decode, deliberately (internal/daemon/sops_manage.go).
-func sopsCheckReplace(c sopsLister, names []string) bool {
+//
+// The terminal and its streams are PARAMETERS rather than os.Stdin/os.Stderr read here, so
+// that the branch this function exists to decide can be exercised: a taken name plus a
+// terminal is the only way it returns true, and a test has no terminal.
+func sopsCheckReplace(c sopsLister, names []string, stdinTTY bool, in io.Reader, out io.Writer) bool {
 	ids, err := c.SopsList()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "av: could not list the stored SOPS identities, so this cannot tell whether it would replace one — refusing rather than risk destroying a key.")
 		fmt.Fprintln(os.Stderr, "av: an entry that will not decode is removable with `av sops rm NAME`.")
 		os.Exit(exitForError(err))
 	}
-	if err := confirmSopsReplace(ids, names, stdinIsTTY(), os.Stdin, os.Stderr); err != nil {
+	if err := confirmSopsReplace(ids, names, stdinTTY, in, out); err != nil {
 		fmt.Fprintln(os.Stderr, "av:", err)
 		os.Exit(exitBadRequest)
 	}
@@ -361,6 +394,17 @@ func sopsCheckReplace(c sopsLister, names []string) bool {
 		}
 	}
 	return false
+}
+
+// sopsWriteVerb names what `av sops keygen` just did, for formatSopsCreated. The distinction
+// is entirely sopsCheckReplace's — the daemon answers a create and a replace identically —
+// so this is the one place the two words are chosen, and choosing them here rather than
+// inline is what lets a test tie the word to the check that decided it.
+func sopsWriteVerb(replacing bool) string {
+	if replacing {
+		return "replaced"
+	}
+	return "created"
 }
 
 // sopsLister is the SopsList half of *client.Client, so the replace check can be exercised
