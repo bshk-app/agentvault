@@ -6,10 +6,10 @@ import "os"
 //
 // It is the ONE knob that points `av`, `avd` and `age-plugin-av` at the same endpoint
 // on every platform, which is what makes an isolated instance possible: an ephemeral
-// daemon on a private path, side by side with the user's real one. scripts/smoke-sops.sh
-// gets that on Unix by pointing $XDG_RUNTIME_DIR at a temp dir, but that lever does not
-// exist on Windows — the default there is derived from %LOCALAPPDATA% — so without this
-// variable there is no way to run a second instance on Windows at all.
+// daemon on a private path, side by side with the user's real one. On Unix the same thing
+// can be had by pointing $XDG_RUNTIME_DIR at a temp dir, but that lever does not exist on
+// Windows — the default there is derived from %LOCALAPPDATA% — so without this variable
+// there is no way to run a second instance on Windows at all.
 //
 // The value is the LOGICAL endpoint path on both platforms. On Unix it is the unix socket
 // itself (and so is still subject to the ~104-byte sun_path limit Listen enforces). On

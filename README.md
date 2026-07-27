@@ -189,12 +189,15 @@ external tap and still installs only `av` and `avd`. A `dangerous`-tier identity
 fresh presence check per file; `normal` (the default) costs one per command. `av sops ls` is
 also the recovery when `sops` reports `no identity matched any of the recipients`.
 
-`sops -d`, `sops updatekeys`, a mixed multi-key `keys.txt`, `helm secrets template` and
-`kustomize`+ksops are all verified against the real binaries by `scripts/smoke-sops.sh`,
-which CI runs on Linux on every push and pull request. **`helm secrets` needs helm-secrets
-4.7.7+ under helm 4** — older releases load as a *getter* and expose no `secrets`
-subcommand. See the [SOPS guide](docs/sops.md) for the walkthrough, the rotation flow,
-troubleshooting, and what brokering the key does *not* protect.
+CI proves the plugin itself: Go tests spawn a real `avd`, have age exec the real
+`age-plugin-av`, and decrypt a standard `age1` file and a mixed multi-key `keys.txt` through
+it. That is the production path **minus the `sops` binary**. Running `sops`, `helm secrets`
+or `kustomize`+ksops against the plugin is *expected* to work — `sops` reaches it through the
+same age plugin protocol, and the other two are ordinary `sops` callers — but no automated
+run in this repository proves it. **`helm secrets` needs helm-secrets 4.7.7+ under helm 4** —
+older releases load as a *getter* and expose no `secrets` subcommand. See the
+[SOPS guide](docs/sops.md) for the walkthrough, the rotation flow, troubleshooting, what to
+check by hand, and what brokering the key does *not* protect.
 
 ## Manifest (`agentvault.yaml`)
 
@@ -307,23 +310,30 @@ for the wiring, the two-layer model, and the scrub-coverage contract.
 
 ## Verification & development
 
-The Touch ID, Secure Enclave, and real-backend paths cannot be exercised by automated
-tests — verify them manually:
+Build and test from source with `make build`, `make test` (`go test ./...`), `make vet`, and
+`make cross-test` (compiles the suite for linux/amd64 and windows/amd64 without running it).
 
-- `scripts/smoke-e2e.sh` — isolated end-to-end of the age-file backend (stub presence,
-  ephemeral daemon and vault; no Touch ID).
-- `scripts/smoke-backends.sh` — real Keychain (and optional 1Password) resolution.
-- `scripts/smoke-sops.sh` — the real `sops` / `helm secrets` / `kustomize`+ksops toolchain
-  against `age-plugin-av` (ephemeral daemon and vault; skips each tool it cannot find,
-  and reports skips separately so one never reads as a pass).
-- `scripts/manual-touchid-smoke.sh` — the human-in-the-loop Touch ID / auto-lock check.
+CI runs `make test`, `make vet` and `make cross-test` on Linux and `go test ./...` on
+Windows for every push and pull request; both are green. There is no macOS job — Touch ID
+and the Secure Enclave are unreachable on a hosted runner, which is exactly where the
+macOS-only risk lives.
+
+Some paths cannot be exercised by automated tests, and the smoke harness that used to drive
+them by hand is **no longer part of this repository**. Verify these on your own machine:
+
+- **Touch ID, the Secure Enclave, and auto-lock** — the human-in-the-loop check: `av unlock`
+  should prompt, cancelling should deny, locking the screen should return `av status` to
+  locked.
+- **Real Keychain and 1Password resolution** — no stub keystore.
+- **The real `sops` / `helm secrets` / `kustomize`+ksops toolchain** against
+  `age-plugin-av`. See
+  [Verifying on your own machine](docs/sops.md#verifying-on-your-own-machine) for what to run
+  and what CI does and does not prove.
 - `docs/launchagent.md` — running `avd` at login and the `av service` login-item
   verification checklist.
 
-Build and test from source with `make build`, `make test`, and `make cross-test`.
-
 > The `AV_TEST_AUTH`, `AV_TEST_ENCLAVE`, and `AV_TEST_KEYSTORE` environment variables
-> select stub presence / stub enclave / stub keystore for CI and the smoke scripts. They
+> select stub presence / stub enclave / stub keystore for CI and the test suite. They
 > are **test-only** and bypass the hardware/keychain protections — never set them in real
 > use.
 

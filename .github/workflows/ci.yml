@@ -1,19 +1,19 @@
 name: ci
 
-# The test workflow. Until this existed, all 541 tests ran only on a developer's laptop,
-# and three things had never executed ANYWHERE:
-#
-#   1. the suite on Linux — `make cross-test` cross-COMPILES for linux/windows and runs
-#      nothing (`-exec=/usr/bin/true`);
-#   2. the suite on Windows — same, and `internal/sopsplugin` has an `.exe` discovery path
-#      written specifically so it could run there;
-#   3. `helm secrets` and `kustomize`+ksops against the age plugin. Both are ordinary sops
-#      callers, but "ordinary sops caller" was an argument, not a test. They are pinned and
-#      installed below precisely so this job is the place that argument gets checked.
+# The test workflow. Until this existed, all 541 tests ran only on a developer's laptop:
+# `make cross-test` cross-COMPILES for linux/windows and runs nothing
+# (`-exec=/usr/bin/true`), so neither suite had ever executed on either platform. The
+# Windows job matters most — `internal/sopsplugin` carries an `.exe` discovery path
+# written specifically so it could run there, and nothing had ever run it.
 #
 # There is deliberately NO macOS job. Secure Enclave and Touch ID are unreachable on a
 # hosted runner, so the interesting macOS-only paths cannot run there anyway, and what is
 # left duplicates the Linux job.
+#
+# NOT covered here: `helm secrets` and `kustomize`+ksops against the age plugin. They are
+# ordinary sops callers, so they are expected to work — but expected is not proven, and
+# this workflow does not prove it. The harness that did was removed from the repository
+# along with the other smoke scripts; see docs/sops.md.
 
 on:
   # Pull requests cover every branch that is up for review; `push` is limited to main so
@@ -25,33 +25,14 @@ on:
 permissions:
   contents: read
 
-# A new push to a PR makes the in-flight run obsolete — the smoke job builds Go binaries
-# and drives a daemon, so it is worth cancelling rather than racing.
+# A new push to a PR makes the in-flight run obsolete; cancel rather than race.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # Pinned, not "latest": this job's whole claim is that a SPECIFIC toolchain combination
-  # works. A floating version would silently change what was proven, and a broken upstream
-  # release would look like our regression.
-  #
-  # helm-secrets 4.7.7 is the load-bearing pin. Helm 4 rejects the legacy plugin layout —
-  # 4.7.0-dev fails to load outright ("both platformCommand and command are set"), and even
-  # a loadable legacy plugin declaring `downloaders:` is registered as a getter with no
-  # `secrets` subcommand. 4.7.7 ships a separate `secrets-<v>.tgz` that is a real Helm 4
-  # plugin (apiVersion: v1, type: cli/v1), which is what makes `helm secrets` a command
-  # again. Verified against helm 4.2.2 before this file was written.
-  HELM_VERSION: v4.2.2
-  HELM_SECRETS_VERSION: 4.7.7
-  SOPS_VERSION: v3.13.1
-  AGE_VERSION: v1.3.1
-  KUSTOMIZE_VERSION: v5.8.1
-  KSOPS_VERSION: 4.5.1
-
 jobs:
   linux:
-    name: linux (test + real-toolchain smoke)
+    name: linux (test)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -74,73 +55,6 @@ jobs:
       # code paths neither job executes.
       - name: make cross-test
         run: make cross-test
-
-      # --- the real toolchain the smoke script drives ---------------------------------
-      # Installed by hand rather than via marketplace actions so every version is visible
-      # in one place above and the job has no dependency it cannot pin.
-      - name: Install sops, age, kustomize, ksops
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.local/bin"
-
-          curl -fsSL -o /tmp/sops \
-            "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.amd64"
-          install -m 0755 /tmp/sops "$HOME/.local/bin/sops"
-
-          curl -fsSL "https://github.com/FiloSottile/age/releases/download/${AGE_VERSION}/age-${AGE_VERSION}-linux-amd64.tar.gz" \
-            | tar xz -C /tmp
-          install -m 0755 /tmp/age/age /tmp/age/age-keygen "$HOME/.local/bin/"
-
-          curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
-            | tar xz -C /tmp
-          install -m 0755 /tmp/kustomize "$HOME/.local/bin/kustomize"
-
-          # ksops is a kustomize *exec* plugin: kustomize resolves it from the plugin dir
-          # under XDG_CONFIG_HOME. The smoke script relocates XDG_CONFIG_HOME into its own
-          # temp tree and re-links whatever it finds, so PATH is enough here.
-          curl -fsSL "https://github.com/viaduct-ai/kustomize-sops/releases/download/v${KSOPS_VERSION}/ksops_${KSOPS_VERSION}_Linux_x86_64.tar.gz" \
-            | tar xz -C /tmp ksops
-          install -m 0755 /tmp/ksops "$HOME/.local/bin/ksops"
-
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Install helm + helm-secrets
-        run: |
-          set -euo pipefail
-          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | tar xz -C /tmp
-          install -m 0755 /tmp/linux-amd64/helm "$HOME/.local/bin/helm"
-          export PATH="$HOME/.local/bin:$PATH"
-
-          # `helm plugin install <tgz>` is not a thing; the Helm 4 plugin is just a
-          # directory under HELM_PLUGINS, so unpack it there.
-          PLUGINS="$(helm env HELM_PLUGINS | tr -d '"')"
-          mkdir -p "$PLUGINS"
-          curl -fsSL -o /tmp/secrets.tgz \
-            "https://github.com/jkroepke/helm-secrets/releases/download/v${HELM_SECRETS_VERSION}/secrets-${HELM_SECRETS_VERSION}.tgz"
-          tar xz -C "$PLUGINS" -f /tmp/secrets.tgz
-
-      # Fails the job here, before the smoke script, if the plugin did not register as a
-      # command — a clearer signal than the smoke script's own skip, and it proves the
-      # AV_SMOKE_REQUIRE guard below is not the only thing standing between a broken
-      # install and a green tick.
-      - name: Verify the toolchain is actually usable
-        run: |
-          set -euo pipefail
-          sops --version --disable-version-check
-          age --version
-          kustomize version
-          helm version --short
-          helm plugin list
-          helm secrets --version
-
-      # AV_SMOKE_REQUIRE is the point of this step. Every tool it names was installed
-      # above on purpose, so a "skipped: tool absent/unusable" here is a broken install,
-      # not a missing dependency — and the script exits non-zero instead of reporting a
-      # run that proved nothing as a pass.
-      - name: Real-toolchain smoke (sops + helm secrets + kustomize/ksops)
-        env:
-          AV_SMOKE_REQUIRE: sops,helm,ksops,age
-        run: bash scripts/smoke-sops.sh
 
   windows:
     name: windows (test)
@@ -169,7 +83,5 @@ jobs:
       # to proving nothing, which is the failure mode it exists against. In particular the
       # daemon end-to-end tests — a real avd over a real named pipe — only run because
       # this is a full `go test`.
-      #
-      # No smoke script here: it is bash + a unix socket and refuses to run on Windows.
       - name: go test ./...
         run: go test ./...

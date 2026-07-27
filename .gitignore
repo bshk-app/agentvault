@@ -9,3 +9,9 @@ claudedocs/
 .agents/
 # account-specific signing material — never commit
 *.provisionprofile
+
+# working artifacts: design/plan documents and the manual smoke harnesses.
+# kept on disk, deliberately out of the repository.
+docs/plans/
+scripts/smoke-*.sh
+scripts/manual-touchid-smoke.sh

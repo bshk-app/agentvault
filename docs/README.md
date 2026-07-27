@@ -26,6 +26,6 @@ These guides go deeper, task by task.
 
 ## Design notes
 
-`docs/plans/` holds the internal design and implementation plans. They record *why*
-the system is shaped the way it is; they are not user documentation and may lag the
-shipped behavior.
+The design and implementation plans are working artifacts and are not part of this
+repository. The reasoning that outlived them lives where it is checked against the code:
+in the comments at each decision site and in the commit history.

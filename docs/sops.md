@@ -130,23 +130,24 @@ helm secrets template myapp ./chart -f values.enc.yaml
 kustomize build --enable-alpha-plugins --enable-exec ./overlay
 ```
 
-`sops --encrypt`, `sops -d`, and `sops updatekeys` are exercised by
-`scripts/smoke-sops.sh` against a real `sops`. `sops edit` is not — it decrypts through the
-same path, but no run has proven it.
+**None of the four commands above is exercised by an automated test.** What the test suite
+proves is the layer directly underneath them: it spawns a real `avd` and has age exec the
+real `age-plugin-av`, which is the production path *minus the `sops` binary itself*.
 
-`helm secrets` and `kustomize`+ksops are covered by the same script, and CI runs it on
-Linux for every push and pull request with `AV_SMOKE_REQUIRE=sops,helm,ksops,age` — which
-turns a *skipped* check into a failed job, so neither can quietly stop being tested when a
-tool fails to install.
+So `sops -d`, `sops edit`, `sops updatekeys`, `helm secrets` and `kustomize`+ksops are all
+**expected** to work — `sops` reaches the plugin through the same age plugin protocol those
+tests drive, and the other two are ordinary `sops` callers — but expected is not proven, and
+nothing in this repository proves them. See [Platform status](#platform-status) for exactly
+where the line falls.
 
 > **Under helm 4, `helm secrets` needs helm-secrets 4.7.7 or newer.** Older releases ship
 > the legacy single-plugin layout, and helm 4 either refuses to load it (`both
 > platformCommand and command are set`) or loads it as a *getter* and registers no
 > subcommand — so `helm secrets` is `unknown command` while `helm plugin list` looks
 > healthy. 4.7.7 publishes a separate `secrets-<version>.tgz` that is a real helm 4 plugin
-> (`type: cli/v1`); unpack it into `$(helm env HELM_PLUGINS)`. `scripts/smoke-sops.sh`
-> reports this case as *installed but unusable* rather than absent, so it is not mistaken
-> for a missing install.
+> (`type: cli/v1`); unpack it into `$(helm env HELM_PLUGINS)`. Worth recognising by name:
+> the symptom reads like a missing install, when in fact the plugin is installed and
+> unusable.
 
 ### A mixed `keys.txt` works
 
@@ -319,41 +320,48 @@ boundary before you rely on it.
 
 ## Verifying on your own machine
 
-```sh
-bash scripts/smoke-sops.sh
-```
+`go test ./...` (or `make test`) covers everything up to the plugin boundary, and needs no
+external toolchain. `cmd/age-plugin-av/main_test.go` builds `avd` and `age-plugin-av`, runs
+an ephemeral daemon against an ephemeral vault, puts the plugin on `PATH` under the name age
+discovers it by, and decrypts through it — a standard `age1` file, a two-pointer `keys.txt`
+where the file is encrypted only to the second key, a stale pointer falling through, the
+locked-vault message, and the dangerous-tier message. `internal/daemon/sops_rpc_test.go`
+covers the `sops_unwrap` RPC beneath it, and `cmd/av/sops_import_test.go` covers
+`av sops import` rewriting the `keys.txt` it read from. All of it runs in CI.
 
-It builds `av`, `avd`, and `age-plugin-av` from the tree, runs an ephemeral daemon against
-an ephemeral vault under a temp `$HOME`, and drives the real `sops`, `helm secrets`, and
-`kustomize`+ksops binaries. It touches nothing of yours — the last check re-hashes every
-real `keys.txt` on this platform and fails if any changed. Auth defaults to the
-`AV_TEST_AUTH=allow` stub;
-`REAL_AUTH=1 bash scripts/smoke-sops.sh` uses the real presence path.
+**The real `sops`, `helm secrets` and `kustomize`+ksops binaries are a manual step.** The
+scripted harness that used to drive them is no longer in this repository, so there is no
+command to run here — check them by hand, against a scratch directory rather than your real
+`keys.txt`:
 
-Every check reports PASS, FAIL, or SKIP, and the summary keeps skips apart from passes: a
-tool you do not have installed produces `NOT TESTED`, never a green line.
+1. `av sops keygen scratch`, and place the recipient and pointer it prints into a scratch
+   `.sops.yaml` and `keys.txt`.
+2. Encrypt and decrypt a throwaway file with `sops` — the round trip is the check.
+3. Re-wrap it with `sops updatekeys` as in [Rotation](#rotation) above.
+4. Run `helm secrets template` and `kustomize build --enable-alpha-plugins --enable-exec`
+   over the same file.
+5. `av sops rm scratch` when you are done.
 
-Skipping is the right answer on a laptop, where a tool is missing because nobody installed
-it, and the wrong one in CI, where it was installed on purpose and a skip means the install
-broke. `AV_SMOKE_REQUIRE=sops,helm,ksops,age` names the tools that must actually be
-exercised; any check that skips for one of them fails the run. An unrecognized tag is
-refused outright, so a typo cannot silently require nothing.
+Point `AV_SOCKET_PATH` at a temp path first if you would rather do this against an isolated
+daemon than your real one.
 
 ### Platform status
 
 | Platform | Status |
 |---|---|
-| Linux | CI (`.github/workflows/ci.yml`) runs `go test ./...` and the whole of `scripts/smoke-sops.sh` on every push and pull request, against pinned real binaries — sops 3.13.1, age 1.3.1, helm 4.2.2 with helm-secrets 4.7.7, kustomize 5.8.1 and ksops 4.5.1. That covers `sops -d`, `sops updatekeys`, a two-pointer `keys.txt`, `av sops import`, the locked-vault message, `helm secrets template` and `kustomize build` + ksops. `AV_SMOKE_REQUIRE` fails the job if any of them skips. |
-| macOS | The same script, run by hand — every check passes with the toolchain above. There is no macOS CI job: Secure Enclave and Touch ID are unreachable on a hosted runner, which is where the macOS-only risk actually lives, so a job could only re-run what Linux already covers. |
-| Windows | CI runs `go test ./...` on `windows-latest` and it is **green**. Plugin discovery through age's `exec.LookPath` (the reason the Makefile emits `age-plugin-av.exe`), named-pipe transport, and the daemon end-to-end path — `cmd/age-plugin-av`'s test drives a real `avd` over a real pipe, decrypting through `sops` — all pass. But note the ceiling: **`avd` only runs on Windows with `AV_TEST_AUTH=allow`**, so what CI proves there is the transport and plugin machinery, not a usable product. See [Windows: what is skipped](#windows-what-is-skipped). `scripts/smoke-sops.sh` still does not run there: it is bash driving a unix socket and refuses to start. |
+| Linux | CI (`.github/workflows/ci.yml`) runs `make test`, `make vet` and `make cross-test` on every push and pull request, and it is **green**. That covers the plugin end-to-end path — a real `avd`, the real `age-plugin-av` found off `PATH`, a standard `age1` file, a two-pointer `keys.txt`, the locked-vault and dangerous-tier messages — plus `av sops import` and the `sops_unwrap` RPC underneath. The job installs **no external toolchain**, so it does not run `sops`, `helm secrets` or `kustomize`+ksops at all. |
+| macOS | `go test ./...` by hand, plus the manual toolchain checks above. There is no macOS CI job: Secure Enclave and Touch ID are unreachable on a hosted runner, which is where the macOS-only risk actually lives, so a job could only re-run what Linux already covers. |
+| Windows | CI runs `go test ./...` on `windows-latest` and it is **green**. Plugin discovery through age's `exec.LookPath` (the reason the Makefile emits `age-plugin-av.exe`), named-pipe transport, `AV_SOCKET_PATH`, and the daemon end-to-end path — `cmd/age-plugin-av`'s test drives a real `avd` over a real pipe and decrypts through the real plugin — all pass. But note the ceiling: **`avd` only runs on Windows with `AV_TEST_AUTH=allow`**, so what CI proves there is the transport and plugin machinery, not a usable product. See [Windows: what is skipped](#windows-what-is-skipped). |
+| Any | `sops`, `helm secrets` and `kustomize`+ksops against the plugin are **proven nowhere**. They are expected to work and were checked by hand during development, but no automated run in this repository exercises them on any platform. |
 
 ### Pointing `av` and `avd` at one endpoint: `AV_SOCKET_PATH`
 
 `AV_SOCKET_PATH` overrides the daemon endpoint. Every process in the chain — `av`, `avd`
 and `age-plugin-av` — resolves its endpoint through the same function, so setting this one
 variable puts them all on a private endpoint together. That is what an **isolated
-instance** is: an ephemeral daemon running beside the user's real one, which is exactly
-what `scripts/smoke-sops.sh` needs.
+instance** is: an ephemeral daemon running beside the user's real one — what the daemon
+end-to-end tests need, and what to reach for when checking the toolchain by hand without
+touching your real vault.
 
 | Platform | Default endpoint | Value of the override |
 |---|---|---|
@@ -406,8 +414,7 @@ transport, `AV_SOCKET_PATH`, and the SOPS decrypt path are genuinely proven; a u
 Windows product needs Windows Hello implemented first.
 
 The security property behind (1) — owner-only files — also still needs a real expression on
-Windows via ACLs. Both gaps are tracked as open risks in
-`docs/plans/2026-07-26-sops-age-plugin.md`; neither is something a test can assert today.
+Windows via ACLs. Both remain open risks, and neither is something a test can assert today.
 
 ### For maintainers: the Formula still omits the plugin
 
