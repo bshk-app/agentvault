@@ -40,6 +40,8 @@ func runSops(args []string) {
 		runSopsShow(args[1:], sopsFieldRecipient)
 	case "identity":
 		runSopsShow(args[1:], sopsFieldIdentity)
+	case "rm":
+		runSopsRm(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "av: unknown sops command %q\n", args[0])
 		sopsUsage()
@@ -48,7 +50,7 @@ func runSops(args []string) {
 }
 
 func sopsUsage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av sops keygen NAME [--tier normal|dangerous]  (generate a SOPS identity inside the vault)\n  av sops ls\n  av sops recipient NAME  (the age1… to encrypt to — put it in .sops.yaml)\n  av sops identity NAME   (the AGE-PLUGIN-AV-1… pointer — put it in keys.txt)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av sops keygen NAME [--tier normal|dangerous]  (generate a SOPS identity inside the vault)\n  av sops ls\n  av sops recipient NAME  (the age1… to encrypt to — put it in .sops.yaml)\n  av sops identity NAME   (the AGE-PLUGIN-AV-1… pointer — put it in keys.txt)\n  av sops rm NAME [--force]")
 }
 
 // sopsKeygenOptions are the parsed args of `av sops keygen`.
@@ -160,6 +162,106 @@ func formatSopsList(ids []ipc.SopsIdentityInfo) string {
 	return b.String()
 }
 
+// sopsRmOptions are the parsed args of `av sops rm`.
+type sopsRmOptions struct {
+	name  string
+	force bool
+}
+
+// parseSopsRmArgs extracts NAME and the optional --force from `av sops rm NAME [--force]`.
+func parseSopsRmArgs(args []string) (sopsRmOptions, error) {
+	var o sopsRmOptions
+	have := false
+	for _, a := range args {
+		switch {
+		case a == "--force":
+			o.force = true
+		case strings.HasPrefix(a, "-"):
+			return o, fmt.Errorf("av sops rm: unexpected flag %q", a)
+		default:
+			if have {
+				return o, fmt.Errorf("av sops rm takes exactly one NAME")
+			}
+			o.name = a
+			have = true
+		}
+	}
+	if !have {
+		return o, fmt.Errorf("av sops rm needs a NAME (use: av sops rm NAME [--force])")
+	}
+	return o, nil
+}
+
+// runSopsRm implements `av sops rm NAME [--force]` — the one command here that destroys
+// something. Deleting a SOPS identity makes every file ever encrypted to it permanently
+// unreadable, and the vault holds the only copy, so it is guarded twice over:
+//
+//   - HERE, by a typed confirmation at a terminal (or an explicit --force). This is the only
+//     guard that can explain the consequence, because a socket has no terminal to explain it at.
+//   - In the DAEMON, by a fresh presence check when the stored tier is dangerous
+//     (sopsTierGate) — a biometric an agent cannot fake, which --force does not bypass.
+//
+// It lists first so the prompt can name the tier and recipient about to be lost, but a
+// FAILED listing must not block the delete: Store.List is strict, so one entry that will not
+// decode breaks it wholesale, and `av sops rm` is deliberately the only way to clear such an
+// entry (internal/daemon/sops_manage.go). On that path the prompt falls back to the name.
+func runSopsRm(args []string) {
+	o, err := parseSopsRmArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		sopsUsage()
+		os.Exit(exitBadRequest)
+	}
+	c := dialClient()
+	id, known := ipc.SopsIdentityInfo{}, false
+	ids, listErr := c.SopsList()
+	switch {
+	case listErr != nil:
+		fmt.Fprintln(os.Stderr, "av: note: could not list the stored identities, so this cannot show what it is deleting:", listErr)
+	default:
+		// A successful listing is COMPLETE (List refuses to skip an entry it cannot
+		// decode), so a name missing from it is genuinely absent — worth reporting before
+		// asking anyone to confirm the deletion of nothing.
+		if id, known = findSopsIdentity(ids, o.name); !known {
+			fmt.Fprintln(os.Stderr, "av:", sopsNoSuchIdentity("rm", o.name))
+			os.Exit(exitBadRequest)
+		}
+	}
+	if err := confirmSopsRemove(sopsRemoveTarget(o.name, id, known), stdinIsTTY(), o.force, os.Stdin, os.Stderr); err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		os.Exit(exitBadRequest)
+	}
+	if err := c.SopsRemove(o.name); err != nil {
+		os.Exit(exitForError(err))
+	}
+	fmt.Printf("removed SOPS identity %q\n", o.name)
+}
+
+// sopsRemoveTarget describes what is about to be deleted: tier and recipient when the
+// listing knew the identity, the bare name when it did not.
+func sopsRemoveTarget(name string, id ipc.SopsIdentityInfo, known bool) string {
+	if !known {
+		return strconv.Quote(name)
+	}
+	return fmt.Sprintf("%s (tier %s, %s)", strconv.Quote(id.Name), id.Tier, id.Recipient)
+}
+
+// confirmSopsRemove prints the consequence and makes a human agree to it.
+//
+// The warning is printed on EVERY path, --force included: a run that deleted a key should
+// have said why it mattered in whatever log captured it. --force then returns without
+// reading stdin at all — a script's stdin is its own data, not an answer to a question.
+func confirmSopsRemove(target string, stdinTTY, force bool, in io.Reader, out io.Writer) error {
+	fmt.Fprintf(out, "this DELETES %s from the vault — every file encrypted to it becomes permanently unreadable.\n", target)
+	if force {
+		return nil
+	}
+	if !stdinTTY {
+		return fmt.Errorf("refusing to delete without a terminal to confirm at — re-run interactively, or pass --force if you are certain")
+	}
+	return sopsConfirm(in, out, "Delete it?")
+}
+
 // sopsShowField selects which half of a listed identity `av sops recipient` and
 // `av sops identity` print. Its VALUE is the subcommand's own name, so the "no such
 // identity" message below reads as the command the user typed without a second table
@@ -190,7 +292,7 @@ func runSopsShow(args []string, field sopsShowField) {
 	}
 	id, ok := findSopsIdentity(ids, name)
 	if !ok {
-		fmt.Fprintln(os.Stderr, "av:", sopsNoSuchIdentity(field, name))
+		fmt.Fprintln(os.Stderr, "av:", sopsNoSuchIdentity(string(field), name))
 		os.Exit(exitBadRequest)
 	}
 	fmt.Println(sopsShowValue(field, id))
@@ -213,8 +315,11 @@ func sopsShowValue(field sopsShowField, id ipc.SopsIdentityInfo) string {
 //
 // The exit code matches too: the daemon returns CodeBadRequest for this, which exitForError
 // maps to exit 2, and the callers of this error exit 2 directly.
-func sopsNoSuchIdentity(field sopsShowField, name string) error {
-	return fmt.Errorf("sops %s %q: no such SOPS identity", field, name)
+//
+// op is the subcommand the user typed, exactly as the daemon interpolates its own op — the
+// sopsShowField constants are spelled to be passed straight in.
+func sopsNoSuchIdentity(op, name string) error {
+	return fmt.Errorf("sops %s %q: no such SOPS identity", op, name)
 }
 
 // parseSopsNameArg extracts the single positional NAME for the sops subcommands that take

@@ -247,8 +247,100 @@ func TestSopsShowValue(t *testing.T) {
 // condition in two packages, with nothing but this test linking them.
 func TestSopsNoSuchIdentityMatchesDaemon(t *testing.T) {
 	const want = `sops recipient "typo": no such SOPS identity`
-	if got := sopsNoSuchIdentity(sopsFieldRecipient, "typo").Error(); got != want {
+	if got := sopsNoSuchIdentity(string(sopsFieldRecipient), "typo").Error(); got != want {
 		t.Fatalf("sopsNoSuchIdentity = %q, want %q", got, want)
+	}
+}
+
+// TestParseSopsRmArgs: NAME plus an optional --force, in either order.
+func TestParseSopsRmArgs(t *testing.T) {
+	for _, tc := range []struct {
+		args  []string
+		name  string
+		force bool
+	}{
+		{[]string{"work"}, "work", false},
+		{[]string{"work", "--force"}, "work", true},
+		{[]string{"--force", "work"}, "work", true},
+	} {
+		o, err := parseSopsRmArgs(tc.args)
+		if err != nil {
+			t.Fatalf("parseSopsRmArgs(%q): %v", tc.args, err)
+		}
+		if o.name != tc.name || o.force != tc.force {
+			t.Fatalf("parseSopsRmArgs(%q) = %+v", tc.args, o)
+		}
+	}
+	for _, args := range [][]string{nil, {"--force"}, {"a", "b"}} {
+		if _, err := parseSopsRmArgs(args); err == nil {
+			t.Fatalf("parseSopsRmArgs(%q) accepted bad args", args)
+		}
+	}
+}
+
+// TestSopsRemoveTarget: the prompt names the tier and recipient when the listing knew the
+// identity, and falls back to the bare name when it did not — a corrupt entry that breaks
+// `av sops ls` must still be removable, so the prompt has to work without a listing.
+func TestSopsRemoveTarget(t *testing.T) {
+	known := sopsRemoveTarget("work", sampleInfo("work", "dangerous"), true)
+	for _, want := range []string{`"work"`, "dangerous", sampleRecipient} {
+		if !strings.Contains(known, want) {
+			t.Fatalf("sopsRemoveTarget(known) = %q, missing %q", known, want)
+		}
+	}
+	if got := sopsRemoveTarget("junk", ipc.SopsIdentityInfo{}, false); got != `"junk"` {
+		t.Fatalf("sopsRemoveTarget(unknown) = %q", got)
+	}
+}
+
+// TestConfirmSopsRemoveWarnsThenAsks: the consequence is printed before the question, on
+// every path — including --force, so whatever log captured the run also captured the warning.
+func TestConfirmSopsRemoveWarnsThenAsks(t *testing.T) {
+	var out bytes.Buffer
+	if err := confirmSopsRemove(`"work"`, true, false, strings.NewReader("yes\n"), &out); err != nil {
+		t.Fatalf("confirmSopsRemove with yes: %v", err)
+	}
+	for _, want := range []string{"work", "unreadable", "yes"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("delete warning missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestConfirmSopsRemoveDeclined: anything but "yes" leaves the key alone.
+func TestConfirmSopsRemoveDeclined(t *testing.T) {
+	var out bytes.Buffer
+	if err := confirmSopsRemove(`"work"`, true, false, strings.NewReader("nope\n"), &out); err == nil {
+		t.Fatal("confirmSopsRemove proceeded on a declined prompt")
+	}
+}
+
+// TestConfirmSopsRemoveRefusesWithoutTTY: no terminal, no --force, no deletion. This is the
+// path a script or an agent takes, and there is nobody there to be warned.
+func TestConfirmSopsRemoveRefusesWithoutTTY(t *testing.T) {
+	var out bytes.Buffer
+	err := confirmSopsRemove(`"work"`, false, false, strings.NewReader("yes\n"), &out)
+	if err == nil {
+		t.Fatal("confirmSopsRemove proceeded without a TTY")
+	}
+	if !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("refusal should name --force: %v", err)
+	}
+	if !strings.Contains(out.String(), "unreadable") {
+		t.Fatalf("the consequence must be printed even when refusing:\n%s", out.String())
+	}
+}
+
+// TestConfirmSopsRemoveForceSkipsPrompt: --force is the deliberate non-interactive opt-out,
+// and it must not read stdin — a script's stdin is its own data, not an answer to a question.
+func TestConfirmSopsRemoveForceSkipsPrompt(t *testing.T) {
+	var out bytes.Buffer
+	in := strings.NewReader("no\n") // would abort if it were read
+	if err := confirmSopsRemove(`"work"`, false, true, in, &out); err != nil {
+		t.Fatalf("confirmSopsRemove --force: %v", err)
+	}
+	if strings.Contains(out.String(), "Type 'yes'") {
+		t.Fatalf("--force must not prompt:\n%s", out.String())
 	}
 }
 
