@@ -134,13 +134,19 @@ kustomize build --enable-alpha-plugins --enable-exec ./overlay
 `scripts/smoke-sops.sh` against a real `sops`. `sops edit` is not — it decrypts through the
 same path, but no run has proven it.
 
-> **`helm secrets` and `kustomize`+ksops are untested.** Neither has ever run against this
-> plugin, anywhere. `scripts/smoke-sops.sh` covers both, but on the machine where it was
-> written `helm-secrets` was installed-but-unusable and `ksops` was absent, so both checks
-> skipped. Both are ordinary `sops` callers — they shell out to `sops`, which is the path
-> that *is* proven — so they are expected to work. Expected is not proven. Run
-> `bash scripts/smoke-sops.sh` on a machine that has them; the two checks report PASS or
-> FAIL by name.
+`helm secrets` and `kustomize`+ksops are covered by the same script, and CI runs it on
+Linux for every push and pull request with `AV_SMOKE_REQUIRE=sops,helm,ksops,age` — which
+turns a *skipped* check into a failed job, so neither can quietly stop being tested when a
+tool fails to install.
+
+> **Under helm 4, `helm secrets` needs helm-secrets 4.7.7 or newer.** Older releases ship
+> the legacy single-plugin layout, and helm 4 either refuses to load it (`both
+> platformCommand and command are set`) or loads it as a *getter* and registers no
+> subcommand — so `helm secrets` is `unknown command` while `helm plugin list` looks
+> healthy. 4.7.7 publishes a separate `secrets-<version>.tgz` that is a real helm 4 plugin
+> (`type: cli/v1`); unpack it into `$(helm env HELM_PLUGINS)`. `scripts/smoke-sops.sh`
+> reports this case as *installed but unusable* rather than absent, so it is not mistaken
+> for a missing install.
 
 ### A mixed `keys.txt` works
 
@@ -327,12 +333,19 @@ real `keys.txt` on this platform and fails if any changed. Auth defaults to the
 Every check reports PASS, FAIL, or SKIP, and the summary keeps skips apart from passes: a
 tool you do not have installed produces `NOT TESTED`, never a green line.
 
+Skipping is the right answer on a laptop, where a tool is missing because nobody installed
+it, and the wrong one in CI, where it was installed on purpose and a skip means the install
+broke. `AV_SMOKE_REQUIRE=sops,helm,ksops,age` names the tools that must actually be
+exercised; any check that skips for one of them fails the run. An unrecognized tag is
+refused outright, so a typo cannot silently require nothing.
+
 ### Platform status
 
 | Platform | Status |
 |---|---|
-| macOS, Linux | `sops -d`, `sops updatekeys`, a two-pointer `keys.txt`, `av sops import`, and the locked-vault message all verified against sops 3.13.1 by `scripts/smoke-sops.sh`. |
-| Windows | The Makefile emits `age-plugin-av.exe`, and the plugin-discovery test exercises age's lookup when run there — but no CI job executes tests on Windows (`make cross-test` only compiles). Unverified until someone runs `go test ./internal/sopsplugin/` on a Windows host. |
+| Linux | CI (`.github/workflows/ci.yml`) runs `go test ./...` and the whole of `scripts/smoke-sops.sh` on every push and pull request, against pinned real binaries — sops 3.13.1, age 1.3.1, helm 4.2.2 with helm-secrets 4.7.7, kustomize 5.8.1 and ksops 4.5.1. That covers `sops -d`, `sops updatekeys`, a two-pointer `keys.txt`, `av sops import`, the locked-vault message, `helm secrets template` and `kustomize build` + ksops. `AV_SMOKE_REQUIRE` fails the job if any of them skips. |
+| macOS | The same script, run by hand — every check passes with the toolchain above. There is no macOS CI job: Secure Enclave and Touch ID are unreachable on a hosted runner, which is where the macOS-only risk actually lives, so a job could only re-run what Linux already covers. |
+| Windows | CI runs `go test ./...` on `windows-latest`, which is what executes `internal/sopsplugin`'s discovery test against age's `exec.LookPath` — the reason the Makefile emits `age-plugin-av.exe`. `scripts/smoke-sops.sh` does **not** run there: it is bash driving a unix socket, and it refuses to start on Windows. So the plugin's *discovery* is covered and the end-to-end `sops` toolchain on Windows is not. |
 
 ### For maintainers: the Formula still omits the plugin
 

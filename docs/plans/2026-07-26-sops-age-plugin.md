@@ -696,10 +696,22 @@ Shipping without the plugin means shipping an install that looks broken in the k
 
 ## Open risks
 
-- **Windows plugin discovery.** The Task 1 spike now exercises it when run on Windows,
-  and the Makefile emits `age-plugin-av.exe` there, but no CI job executes tests on
-  Windows — `make cross-test` only compiles. Unverified until someone runs it.
-- **`sops updatekeys` through the plugin.** Should work; confirm in Task 11.
-- **Real `sops`, `helm secrets`, and `kustomize`+ksops.** Everything proven so far runs
-  against the age *library*, plus one manual run of the real `age` binary in Task 10.
-  Task 11 is the first and only place the actual toolchain is exercised.
+Largely closed by `.github/workflows/ci.yml`, which is where the toolchain and the
+non-macOS platforms finally execute. What each risk turned into:
+
+- **Windows plugin discovery.** *Now run.* A `windows-latest` job runs `go test ./...`,
+  which is the first execution of this suite on Windows and covers the Task 1 spike's
+  `.exe` path. Getting there required fixing `os.MkdirTemp("/tmp", …)` in five packages —
+  `/tmp` was pinned for macOS's `sun_path` limit, and it simply does not exist on Windows,
+  so those tests could never have run there. Still open: nothing *else* about Windows is
+  proven, and the smoke script does not run there at all (bash + a unix socket).
+- **`sops updatekeys` through the plugin.** *Closed.* `scripts/smoke-sops.sh` re-wraps a
+  file, asserts the added recipient, and decrypts the result again; it runs in CI.
+- **Real `sops`, `helm secrets`, and `kustomize`+ksops.** *Closed on Linux.* The Linux job
+  installs pinned real binaries and runs the smoke script with
+  `AV_SMOKE_REQUIRE=sops,helm,ksops,age`, so a check that skips fails the job instead of
+  passing quietly. `helm secrets` needed helm-secrets **4.7.7** — under helm 4 the older
+  layout loads as a getter and exposes no `secrets` subcommand, which is exactly the
+  "installed but unusable" state the script was built to distinguish.
+- **Still open: macOS has no CI.** Secure Enclave and Touch ID cannot run on a hosted
+  runner, so the Enclave-tier paths remain covered only by local runs.

@@ -14,6 +14,19 @@ A GitHub-hosted runner would need the Developer ID cert imported into a temp key
 every run. alex-mac already has the cert in its login keychain, so signing "just works" —
 the workflow only injects the account-specific *provisioning profile* + notary creds.
 
+## Why the test workflow has no Gitea twin
+
+`release.yml` exists in both `.github/` and `.gitea/` because each is written for its own
+infrastructure — cert-import on a hosted runner versus a login keychain on alex-mac — not
+because the two directories are kept in sync.
+
+The test workflow, [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), is
+deliberately **GitHub-only**. It needs a Linux runner and a Windows runner and has no
+macOS job at all, which is the exact inverse of this Gitea setup: one self-hosted macOS
+runner, present because signing requires a Mac. Mirroring it here would mean inventing
+`runs-on` labels for runners that do not exist. Add a Gitea twin only if you register
+Linux/Windows runners — and then set `runs-on` to *their* labels.
+
 ## One-time setup
 
 ### 1. Repos in your Gitea

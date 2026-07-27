@@ -186,11 +186,12 @@ external tap and still installs only `av` and `avd`. A `dangerous`-tier identity
 fresh presence check per file; `normal` (the default) costs one per command. `av sops ls` is
 also the recovery when `sops` reports `no identity matched any of the recipients`.
 
-`sops -d`, `sops updatekeys`, and a mixed multi-key `keys.txt` are verified against a real
-`sops`. **`helm secrets` and `kustomize`+ksops are untested** — they are ordinary `sops`
-callers and are expected to work, but no run has proven it. See the
-[SOPS guide](docs/sops.md) for the walkthrough, the rotation flow, troubleshooting, and what
-brokering the key does *not* protect.
+`sops -d`, `sops updatekeys`, a mixed multi-key `keys.txt`, `helm secrets template` and
+`kustomize`+ksops are all verified against the real binaries by `scripts/smoke-sops.sh`,
+which CI runs on Linux on every push and pull request. **`helm secrets` needs helm-secrets
+4.7.7+ under helm 4** — older releases load as a *getter* and expose no `secrets`
+subcommand. See the [SOPS guide](docs/sops.md) for the walkthrough, the rotation flow,
+troubleshooting, and what brokering the key does *not* protect.
 
 ## Manifest (`agentvault.yaml`)
 
