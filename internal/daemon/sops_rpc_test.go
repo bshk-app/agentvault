@@ -14,6 +14,7 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/beshkenadze/agentvault/internal/audit"
 	"github.com/beshkenadze/agentvault/internal/backend"
 	"github.com/beshkenadze/agentvault/internal/backend/agefile"
 	"github.com/beshkenadze/agentvault/internal/ipc"
@@ -258,32 +259,82 @@ var sopsAuditDetails = []string{
 	"ok",                    // sops_unwrap: the file key was returned; sops_keygen/put/rm: the mutation happened
 	"no matching stanza",    // sops_unwrap: the identity is ours, the file is not
 	"malformed stanza",      // sops_unwrap: the header is not a header
-	"no presence available", // sops_unwrap: dangerous tier, and the caller set NoPrompt
-	"sops unwrap",           // denied: a dangerous-tier presence check the user cancelled
+	"no presence available", // any sops Kind: dangerous tier, and the caller set NoPrompt
+	// denied: a dangerous-tier presence check the user cancelled, named per operation in the
+	// SUBCOMMAND's vocabulary — so a cancelled destroy is not filed as a cancelled read.
+	"sops unwrap",
+	"sops keygen",
+	"sops import",
+	"sops rm",
 }
 
-// sopsAuditKinds is every Kind the SOPS surface writes. The list is what makes the
-// allowlist above cover the MANAGEMENT RPCs too: an entry whose Kind is not checked is an
-// entry whose Detail is not checked, so a new RPC that logs under a Kind nobody added here
-// would be exempt from the one assertion standing between the audit log and key material.
-var sopsAuditKinds = []string{"sops_unwrap", "sops_keygen", "sops_put", "sops_rm", "denied"}
-
-// assertAuditDetails holds every sops event the fixture logged against that set.
-func assertAuditDetails(t *testing.T, log *bufLogger) {
-	t.Helper()
-	for _, e := range log.all() {
-		if !slices.Contains(sopsAuditKinds, e.Kind) {
+// sopsAuditLeak returns the first logged event whose Detail is outside that closed set, and
+// whether there was one. It is split out from the assertion so the GUARD ITSELF can be
+// tested — see TestSopsAuditAssertionCatchesAnUnlistedKind, which is the mutation Task 9a's
+// review ran, kept as a test.
+//
+// The Kind test is a PREFIX and not a list of known Kinds, and the difference is the review
+// finding. With a list, an entry whose Kind nobody had remembered to add was SKIPPED rather
+// than checked — so the assertion was fail-OPEN in the one direction that matters, and a
+// future `sops_rotate` logging a private key in Detail passed it silently with the key
+// sitting in the audit output. Every Kind this surface writes begins with `sops_`, plus the
+// shared "denied", so the prefix covers tomorrow's RPC without anyone coming back here.
+func sopsAuditLeak(events []audit.Event) (audit.Event, bool) {
+	for _, e := range events {
+		if !strings.HasPrefix(e.Kind, "sops_") && e.Kind != "denied" {
 			continue
 		}
 		if slices.Contains(sopsAuditDetails, e.Detail) {
 			continue
 		}
-		// SECURITY: the offending Detail is NOT printed. If this assertion is firing, the
-		// most likely reason is that it now carries key material, and a t.Fatalf is a
-		// straight path from there into a CI log. Its length is enough to identify it.
-		t.Fatalf("audit %q entry for %q recorded a Detail of %d bytes that is not one of %v — "+
-			"an outcome outside that set is how key material reaches the log",
-			e.Kind, e.Name, len(e.Detail), sopsAuditDetails)
+		return e, true
+	}
+	return audit.Event{}, false
+}
+
+// assertAuditDetails holds every sops event the fixture logged against that set.
+func assertAuditDetails(t *testing.T, log *bufLogger) {
+	t.Helper()
+	e, bad := sopsAuditLeak(log.all())
+	if !bad {
+		return
+	}
+	// SECURITY: the offending Detail is NOT printed. If this assertion is firing, the
+	// most likely reason is that it now carries key material, and a t.Fatalf is a
+	// straight path from there into a CI log. Its length is enough to identify it.
+	t.Fatalf("audit %q entry for %q recorded a Detail of %d bytes that is not one of %v — "+
+		"an outcome outside that set is how key material reaches the log",
+		e.Kind, e.Name, len(e.Detail), sopsAuditDetails)
+}
+
+// TestSopsAuditAssertionCatchesAnUnlistedKind keeps Task 9a's review finding as a test.
+//
+// The Detail allowlist used to be reached only through a LIST of known Kinds, which made it
+// fail-open: an entry under a Kind nobody had added was skipped rather than checked. The
+// reviewer logged exactly the event below — an unlisted `sops_*` Kind carrying a real
+// AGE-SECRET-KEY-1… in Detail — and assertAuditDetails PASSED, with the key in the audit
+// output. The guard must report it now, which is the first case here; the other two are
+// what stops "report everything" from passing as a fix.
+func TestSopsAuditAssertionCatchesAnUnlistedKind(t *testing.T) {
+	key, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SECURITY: a REAL private key, deliberately — the point is that the genuine article is
+	// caught. It is never printed: what is asserted is only whether the guard found it.
+	leak := audit.Event{Kind: "sops_rotate", Name: "work", Tier: "normal", Detail: key.String()}
+	if _, bad := sopsAuditLeak([]audit.Event{leak}); !bad {
+		t.Fatal("SECURITY: an unlisted sops_ Kind carrying a private key in Detail passed the audit assertion")
+	}
+	// A legitimate outcome under a Kind that IS listed still passes, so the guard is not
+	// merely refusing everything.
+	if e, bad := sopsAuditLeak([]audit.Event{{Kind: "sops_unwrap", Name: "work", Detail: "ok"}}); bad {
+		t.Fatalf("a legitimate %q entry was reported as a leak", e.Kind)
+	}
+	// And an event from outside this surface is still none of this assertion's business —
+	// the sops path does not get to dictate what `resolve` may write.
+	if _, bad := sopsAuditLeak([]audit.Event{{Kind: "resolve", Name: "PLAIN", Detail: "issued"}}); bad {
+		t.Fatal("a non-sops audit entry was reported as a leak")
 	}
 }
 
