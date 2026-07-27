@@ -315,6 +315,46 @@ func (c *Client) Remove(backend, locator string) error {
 	return nil
 }
 
+// SopsUnwrap issues the "sops_unwrap" RPC on behalf of age-plugin-av: it ferries one
+// file's header stanzas to the daemon and returns the per-FILE key the daemon unwrapped
+// with a stored SOPS identity. The SOPS private key never leaves avd, and the reply
+// decrypts exactly one file. There is no `av` subcommand for this — the caller is the
+// plugin, not av.
+//
+// recipient crosses as []byte rather than an *age.X25519Recipient, and the asymmetry with
+// the daemon (which parses it, so Store.FindByRecipient takes the typed value and the
+// comparison cannot go wrong there) is deliberate: this package is linked into the thin
+// av, which must import no age at all — see TestAvStaysThin in cmd/av. Parsing here would
+// drag that tree into every av invocation.
+//
+// It carries the bech32 "age1…" TEXT: pass []byte(recipient.String()) and nothing else.
+// encoding/json already base64s a []byte, so re-encoding it here would arrive as
+// base64-of-base64, fail the daemon's parse, and report every file as one this vault holds
+// no key for — the same answer a file that genuinely is not yours gets.
+//
+// SECURITY: the returned file key IS a secret. It is handed to the caller and must reach
+// no log and no error. On a daemon error it returns resp.Error (a *ipc.RPCError) so the
+// caller can map its Code — and relay its Message, which for CodeLocked is the only thing
+// separating a locked vault from a dangerous-tier identity refused under no_prompt.
+func (c *Client) SopsUnwrap(recipient []byte, stanzas []ipc.SopsStanza) ([]byte, error) {
+	if err := c.ensureFresh(); err != nil {
+		return nil, err
+	}
+	p, _ := json.Marshal(ipc.SopsUnwrapParams{Recipient: recipient, Stanzas: stanzas, NoPrompt: c.noPrompt})
+	resp, err := c.call(ipc.Request{ID: 1, Method: "sops_unwrap", Params: p})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, resp.Error
+	}
+	var r ipc.SopsUnwrapResult
+	if err := json.Unmarshal(resp.Result, &r); err != nil {
+		return nil, err
+	}
+	return r.FileKey, nil
+}
+
 // Setup issues the "setup" RPC: it asks the daemon to provision the local age store
 // (identity + empty vault) and returns the on-disk paths plus whether files were created
 // this call. SECURITY: SetupParams/SetupResult carry NO secret — only two booleans and
