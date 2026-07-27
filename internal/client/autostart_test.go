@@ -23,7 +23,7 @@ func TestAutostartColdPing(t *testing.T) {
 	}
 
 	// Short base dir under /tmp keeps the socket path within sun_path limits.
-	dir, err := os.MkdirTemp("/tmp", "avi")
+	dir, err := os.MkdirTemp(shortTempBase(), "avi")
 	if err != nil {
 		t.Fatal(err)
 	}

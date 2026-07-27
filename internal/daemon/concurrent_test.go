@@ -13,7 +13,7 @@ import (
 // it. Real avd runs against ~/Library/Caches/agentvault/avd.sock where that dir
 // does not exist on first start.
 func TestNewCreatesMissingParentDir(t *testing.T) {
-	base, err := os.MkdirTemp("/tmp", "avp")
+	base, err := os.MkdirTemp(shortTempBase(), "avp")
 	if err != nil {
 		t.Fatal(err)
 	}

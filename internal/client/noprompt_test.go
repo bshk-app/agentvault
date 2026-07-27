@@ -67,7 +67,7 @@ func nopromptServer(t *testing.T) string {
 
 func shortDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "avnp")
+	dir, err := os.MkdirTemp(shortTempBase(), "avnp")
 	if err != nil {
 		t.Fatal(err)
 	}

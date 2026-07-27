@@ -3,17 +3,29 @@ package client
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/beshkenadze/agentvault/internal/daemon"
 )
 
-// shortSocketPath returns a socket path under /tmp to stay well under the macOS
-// 104-byte sun_path limit (t.TempDir() paths are too long for unix sockets).
+// shortTempBase is the parent for a temp dir that will hold a unix socket: macOS caps
+// sun_path near 104 bytes and t.TempDir()'s /var/folders/... base blows it before the
+// test can say anything useful. Windows uses a named pipe with no such cap and has no
+// /tmp at all, so there the OS temp dir ("") is both correct and the only thing that
+// exists. Same reasoning as cmd/age-plugin-av/main_test.go.
+func shortTempBase() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	return "/tmp"
+}
+
+// shortSocketPath returns a socket path under shortTempBase().
 func shortSocketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "avc")
+	dir, err := os.MkdirTemp(shortTempBase(), "avc")
 	if err != nil {
 		t.Fatal(err)
 	}

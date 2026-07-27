@@ -148,7 +148,7 @@ func readIdentityRecipient(idPath string) (age.Recipient, error) {
 func buildAndAutostartEnv(t *testing.T, auth string) (dir, sockPath, manifestPath string) {
 	t.Helper()
 
-	dir, err := os.MkdirTemp("/tmp", "ave")
+	dir, err := os.MkdirTemp(shortTempBase(), "ave")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func buildAndAutostartEnv(t *testing.T, auth string) (dir, sockPath, manifestPat
 func buildAndAutostartZeroConfig(t *testing.T) (sockPath, cfgDir string) {
 	t.Helper()
 
-	dir, err := os.MkdirTemp("/tmp", "avz")
+	dir, err := os.MkdirTemp(shortTempBase(), "avz")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func buildAndAutostartZeroConfig(t *testing.T) (sockPath, cfgDir string) {
 func buildAndAutostartKeychain(t *testing.T) (sockPath, cfgDir, keystoreDir string) {
 	t.Helper()
 
-	dir, err := os.MkdirTemp("/tmp", "avk")
+	dir, err := os.MkdirTemp(shortTempBase(), "avk")
 	if err != nil {
 		t.Fatal(err)
 	}
