@@ -41,7 +41,33 @@ escape hatch.
 - Runtime/audit state: `%LocalAppData%\AgentVault`.
 - Vault/config state: `%AppData%\AgentVault`.
 
-Current gap: Windows Hello presence and session-lock auto-lock still need native bridges.
-Production Windows builds therefore fail closed for `av unlock` unless the test stub
-environment is explicitly enabled, and should not yet be treated as parity with macOS or
-Linux desktop builds.
+- Socket/pipe override: `AV_SOCKET_PATH` selects the endpoint on every platform. On
+  Windows the pipe name is derived from that logical path by hash, so an override yields
+  a genuinely independent instance — which is the only way to run a second one there.
+
+### Current gaps — Windows is not usable yet
+
+**`avd` does not start.** `selectPresence` (`cmd/avd/main.go`) treats a missing presence
+provider as fatal, deliberately, so the daemon never brokers a secret without a real
+check. `newTouchIDPresence` in `internal/daemon/presence_windows.go` always returns an
+error because the Windows Hello WinRT bridge is unimplemented. So the daemon comes up
+only under `AV_TEST_AUTH`, which is test-only and bypasses the very protection it stands
+for. This is stronger than "missing parity": there is no working configuration.
+
+**Owner-only file permissions have no expression.** `0600` and `0700` require an explicit
+NTFS ACL, and Go's `os` package cannot set one — `os.Chmod` toggles only the read-only
+attribute, and `Mode().Perm()` can never report anything but `0666`/`0444`/`0777`/`0555`.
+The vault, the identity file, and the audit log are therefore not restricted to their
+owner the way they are on Unix. For a secret store that is a real gap, not a formality;
+closing it needs `golang.org/x/sys/windows` ACL work.
+
+**Auto-lock on session lock / sleep** still needs a native bridge.
+
+### What CI does prove on Windows
+
+`go test ./...` runs on `windows-latest` on every push. The named-pipe transport,
+`age-plugin-av` discovery through `PATHEXT`, `AV_SOCKET_PATH`, and the SOPS decrypt path
+all pass. Three things are skipped, each naming its cause: the permission-bit assertions,
+`TestAddFailureLeavesOriginalIntact` (a read-only directory attribute does not deny file
+creation on Windows), and `TestE2ELockedRunFails` (it needs an `avd` with no auth, which
+on Windows is an `avd` that does not start).

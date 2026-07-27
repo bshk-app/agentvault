@@ -43,8 +43,11 @@ by the **OS keychain/keyring tier** — see [Identity protection tiers](#identit
 The strongest tier, the Secure Enclave, needs a signed binary and will arrive via a
 future signed Cask (`brew install --cask …`, planned).
 
-Linux and Windows builds are supported from source today. See [platform support](docs/platforms.md)
-for required desktop components and packaging status.
+**Linux** builds from source today. **Windows does not yet run**: `avd` refuses to start
+without a real presence check, and the Windows Hello bridge is unimplemented, so the
+daemon only comes up under the test stub. Windows compiles and its test suite passes in
+CI — the transport, the plugin, and the SOPS path all work — but it is not a usable
+install. See [platform support](docs/platforms.md).
 
 ## Quick start
 
@@ -326,7 +329,21 @@ Build and test from source with `make build`, `make test`, and `make cross-test`
 
 ## Status / non-goals
 
-Linux/Windows support is source-build/desktop-prerequisite level. Windows Hello presence
-and Windows auto-lock still need native bridges before Windows reaches full macOS parity.
+Linux support is source-build/desktop-prerequisite level.
+
+**Windows is not usable yet**, and the gap is larger than "missing parity":
+
+- **`avd` will not start.** `selectPresence` treats a missing presence provider as fatal —
+  deliberately, so the daemon never brokers a secret without a real check — and the
+  Windows Hello bridge is unimplemented. The daemon comes up only under `AV_TEST_AUTH`,
+  which is test-only and bypasses the protection it stands for.
+- **Owner-only files have no expression.** `0600` needs an explicit NTFS ACL, which Go's
+  `os` package cannot set, so the vault and identity files are not restricted to their
+  owner the way they are on Unix. That is a real gap for a secret store, not a formality.
+- Auto-lock on screen-lock/sleep also needs a native bridge.
+
+What Windows *does* have, proven by CI on every push: the named-pipe transport,
+`age-plugin-av` discovery, `AV_SOCKET_PATH`, and the SOPS decrypt path.
+
 Additional backends (HashiCorp Vault, AWS Secrets Manager) are future work. Keychain,
 1Password, and Bitwarden stay read-only — manage those secrets with their own tools.
