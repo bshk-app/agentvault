@@ -19,8 +19,8 @@ untouched, and teammates, CI, and Flux read the same files with the same keys.
   on your `PATH`. `make build` puts it in `bin/` beside `av` and `avd`; install all three
   together.
 
-> **`brew install` does not ship the plugin yet.** The Formula lives in an external tap and
-> still installs only `av` and `avd` — see [the release blocker](#for-maintainers-the-formula-still-omits-the-plugin).
+> The signed Cask installs all three. Building from source, install them together — see
+> [how the plugin reaches an installed machine](#how-the-plugin-reaches-an-installed-machine).
 
 ## Move your existing key into the vault
 
