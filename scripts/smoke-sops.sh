@@ -35,22 +35,53 @@
 # absent, skips them by name rather than failing obscurely). helm-secrets and ksops are
 # optional and skipped when absent or unusable.
 #
+# AV_SMOKE_REQUIRE=sops,helm,ksops,age turns those skips into FAILURES. Skipping is the
+# right answer on a developer's laptop, where a tool is missing because nobody installed
+# it. It is the wrong answer in CI, where the tools are installed on purpose: there a skip
+# means the INSTALL broke, and a green run that silently skipped the checks would assert
+# exactly nothing while looking like proof. The tags are the ones printed in the header —
+# an unknown tag is refused rather than ignored, so a typo cannot quietly require nothing.
+#
 # Usage:  bash scripts/smoke-sops.sh
 #         REAL_AUTH=1 bash scripts/smoke-sops.sh
+#         AV_SMOKE_REQUIRE=sops,helm,ksops,age bash scripts/smoke-sops.sh   # CI
 set -uo pipefail
 
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 [ "$(uname -s)" = "Windows_NT" ] && { echo "unix only (the Windows plugin path is unverified — see the plan's open risks)"; exit 1; }
 command -v go >/dev/null 2>&1 || { echo "go toolchain not on PATH (this script builds av/avd/age-plugin-av from $REPO)"; exit 1; }
 
+# --- which skips are tolerable on this run -------------------------------------------
+# Each skip carries a TAG naming the tool it needed. AV_SMOKE_REQUIRE lists the tags this
+# run installed on purpose; a skip carrying one of them is a broken install, not a missing
+# tool, so it is collected here and turned into a non-zero exit at the end.
+KNOWN_TAGS="sops helm ksops age"
+REQUIRE="$(printf '%s' "${AV_SMOKE_REQUIRE:-}" | tr ',' ' ')"
+for t in $REQUIRE; do
+  case " $KNOWN_TAGS " in
+    *" $t "*) ;;
+    *) echo "AV_SMOKE_REQUIRE: unknown tag '$t' (known: $KNOWN_TAGS)" >&2; exit 2 ;;
+  esac
+done
+REQUIRED_SKIPS=""
+# note_skip TAG CHECK — records CHECK if TAG was required. Returns 0 unconditionally so
+# that neither absent() nor broken() ever reports a non-zero status to its caller.
+note_skip(){
+  case " $REQUIRE " in
+    *" $1 "*) REQUIRED_SKIPS="$REQUIRED_SKIPS
+  - $2 (needs: $1)" ;;
+  esac
+  return 0
+}
+
 PASS=0; FAIL=0; SKIPPED_ABSENT=0; SKIPPED_BROKEN=0
 SKIPS=""
 ok(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS+1)); }
 no(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
 absent(){ printf '  \033[33mSKIP\033[0m %s \033[33m[tool absent: %s]\033[0m\n' "$1" "$2"; SKIPPED_ABSENT=$((SKIPPED_ABSENT+1)); SKIPS="$SKIPS
-  - $1 — NOT TESTED (tool absent: $2)"; }
+  - $1 — NOT TESTED (tool absent: $2)"; note_skip "${3:-}" "$1"; }
 broken(){ printf '  \033[35mSKIP\033[0m %s \033[35m[tool installed but unusable: %s]\033[0m\n' "$1" "$2"; SKIPPED_BROKEN=$((SKIPPED_BROKEN+1)); SKIPS="$SKIPS
-  - $1 — NOT TESTED (installed but unusable: $2)"; }
+  - $1 — NOT TESTED (installed but unusable: $2)"; note_skip "${3:-}" "$1"; }
 info(){ printf '  \033[36m..\033[0m %s\n' "$1"; }
 
 sha(){ # sha of a file, or the literal ABSENT — so "the file is gone" is a distinct value
@@ -230,6 +261,7 @@ echo "auth  = $AUTHDESC"
 echo "sops  = ${SOPS_VER:-none} ($SOPS_STATE${SOPS_WHY:+: $SOPS_WHY})"
 echo "helm  = $HELM_STATE${HELM_WHY:+: $HELM_WHY}"
 echo "ksops = ${KSOPS_BIN:-absent}"
+[ -n "$REQUIRE" ] && echo "require = $REQUIRE (a skip of these is a FAILURE)"
 echo
 
 "$BIN/avd" >"$WORK/avd.log" 2>&1 &
@@ -272,7 +304,7 @@ if [ "$SOPS_STATE" != "ok" ] || [ -z "$REC1" ]; then
   why="${SOPS_WHY:-no SOPS identity to test with}"
   for c in "sops -d through the plugin" "sops updatekeys" "locked vault under AV_NO_PROMPT" \
            "plugin-not-found control" "multi-pointer keys.txt"; do
-    if [ "$SOPS_STATE" = "broken" ]; then broken "$c" "$why"; else absent "$c" "$why"; fi
+    if [ "$SOPS_STATE" = "broken" ]; then broken "$c" "$why" sops; else absent "$c" "$why" sops; fi
   done
 else
   # 1) THE HEADLINE CLAIM: a file encrypted to an ORDINARY age1… recipient, by ordinary
@@ -398,11 +430,11 @@ fi
 # HELM_PLUGINS is carried over from the real environment because the plugin lives under the
 # user's HOME, which this script has moved. It is read, never written.
 if [ "$HELM_STATE" = "absent" ]; then
-  absent "helm secrets template" "$HELM_WHY"
+  absent "helm secrets template" "$HELM_WHY" helm
 elif [ "$HELM_STATE" = "broken" ]; then
-  broken "helm secrets template" "$HELM_WHY"
+  broken "helm secrets template" "$HELM_WHY" helm
 elif [ "$SOPS_STATE" != "ok" ] || [ -z "$REC1" ]; then
-  absent "helm secrets template" "${SOPS_WHY:-no SOPS identity to test with}"
+  absent "helm secrets template" "${SOPS_WHY:-no SOPS identity to test with}" helm
 else
   mkdir -p "$WORK/chart/templates"
   cat > "$WORK/chart/Chart.yaml" <<'YAML'
@@ -439,11 +471,11 @@ fi
 
 # --- 4) kustomize + ksops --------------------------------------------------------------
 if ! command -v kustomize >/dev/null 2>&1; then
-  absent "kustomize build --enable-alpha-plugins (ksops)" "kustomize not on PATH"
+  absent "kustomize build --enable-alpha-plugins (ksops)" "kustomize not on PATH" ksops
 elif [ -z "$KSOPS_BIN" ]; then
-  absent "kustomize build --enable-alpha-plugins (ksops)" "ksops not on PATH nor in a kustomize plugin dir"
+  absent "kustomize build --enable-alpha-plugins (ksops)" "ksops not on PATH nor in a kustomize plugin dir" ksops
 elif [ "$SOPS_STATE" != "ok" ] || [ -z "$REC1" ]; then
-  absent "kustomize build --enable-alpha-plugins (ksops)" "${SOPS_WHY:-no SOPS identity to test with}"
+  absent "kustomize build --enable-alpha-plugins (ksops)" "${SOPS_WHY:-no SOPS identity to test with}" ksops
 else
   # The plugin dir moved with XDG_CONFIG_HOME, so the real ksops is linked into the
   # ephemeral one at the location kustomize looks for it.
@@ -499,9 +531,9 @@ fi
 # success. The check is therefore both halves: the pointer landed *here*, and the
 # config-dir file did not move.
 if [ -z "$REC1" ]; then
-  absent "av sops import → SOPS_AGE_KEY_FILE" "no daemon session to import into"
+  absent "av sops import → SOPS_AGE_KEY_FILE" "no daemon session to import into" sops
 elif ! command -v age-keygen >/dev/null 2>&1; then
-  absent "av sops import → SOPS_AGE_KEY_FILE" "age-keygen not on PATH (needed to make a plaintext key to import)"
+  absent "av sops import → SOPS_AGE_KEY_FILE" "age-keygen not on PATH (needed to make a plaintext key to import)" age
 else
   mkdir -p "$WORK/import" "$XDG_CONFIG_HOME/sops/age"
   CFG_KEYS="$XDG_CONFIG_HOME/sops/age/keys.txt"
@@ -577,4 +609,11 @@ if [ "$FAIL" -ne 0 ]; then
   echo "--- avd.log ---"; cat "$WORK/avd.log"
   [ -f "$WORK/av.err" ] && { echo "--- av.err ---"; cat "$WORK/av.err"; }
 fi
-[ "$FAIL" -eq 0 ]
+if [ -n "$REQUIRED_SKIPS" ]; then
+  # Deliberately louder than a FAIL line: every check the caller asked for reported
+  # something other than a failure, so without this the run reads as a clean pass.
+  printf '\n\033[31m==== REQUIRED CHECKS DID NOT RUN (AV_SMOKE_REQUIRE=%s) ====\033[0m\n' "${AV_SMOKE_REQUIRE:-}"
+  echo "These tools were installed on purpose, so a skip means the install is broken:$REQUIRED_SKIPS"
+  echo "(see the SKIP lines above for the reason each one gave)"
+fi
+[ "$FAIL" -eq 0 ] && [ -z "$REQUIRED_SKIPS" ]
