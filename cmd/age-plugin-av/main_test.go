@@ -259,11 +259,16 @@ func TestAgePluginAvEndToEnd(t *testing.T) {
 		if err == nil {
 			t.Fatal("a locked vault must not decrypt")
 		}
-		// The daemon's ErrLocked text, verbatim under the prefix — asserted in full rather
-		// than by keyword so that this and the dangerous-tier subtest below pin two
-		// DIFFERENT strings. A substituted message that satisfied both would be exactly the
-		// bug: one text for two situations that need opposite responses.
-		const want = "AgentVault: vault locked: authorization not available"
+		// The daemon's message, verbatim under the prefix — asserted in full rather than by
+		// keyword so that this and the dangerous-tier subtest below pin two DIFFERENT
+		// strings. A substituted message that satisfied both would be exactly the bug: one
+		// text for two situations that need opposite responses.
+		//
+		// It carries the ADVICE, which is the half decision 6 promises and the half a
+		// relayed ErrLocked ("vault locked: authorization not available") does not have.
+		// The plugin still invents nothing; the daemon says it, because on this path the
+		// daemon's string is what the human reads.
+		const want = `AgentVault: sops unwrap: vault locked — ask a human to run "av unlock"`
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("locked error = %q, want it to carry %q", err, want)
 		}

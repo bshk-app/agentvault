@@ -161,8 +161,25 @@ av unlock`, matching the exit-69 behavior of every other command.
 that one.** `CodeLocked` turned out to cover two situations — a locked session, and a
 dangerous-tier identity whose fresh per-file check was skipped under `no_prompt`, where the
 session is open and `av unlock` changes nothing. A fixed "run `av unlock`" makes the second
-a loop, and the plugin is the last layer that could have told them apart. The text above
-remains what the daemon sends for a genuinely locked session.
+a loop, and the plugin is the last layer that could have told them apart.
+
+**Amended again by Task 8's review — the advice moved into the daemon.** Relaying alone
+did not keep this decision's promise: what the daemon actually sent for a locked session
+was `daemon.ErrLocked`'s text, `vault locked: authorization not available`, which names the
+state and not the fix, so nobody was told to run `av unlock`. The plugin could not add it
+without committing the substitution the amendment above forbids. So the SOPS path now sends
+its own string, exactly as the dangerous-tier gate already does:
+
+```
+sops unwrap: vault locked — ask a human to run "av unlock"
+```
+
+reaching the user through the plugin as `AgentVault: sops unwrap: vault locked — ask a
+human to run "av unlock"`. `ErrLocked`'s own text is unchanged: every other path is read by
+`cmd/av`, which renders its own actionable string (`cmd/av/main.go:402`) and never sees
+this one. This is the only path whose message reaches a human unedited, so it is the only
+one that needs the advice baked in. The two messages stay deliberately different, and the
+tests assert both — one substituted string satisfying both situations is the bug.
 
 ### 7. "Try the next identity" is a wire code, not a phrase — `CodeNoMatch`
 

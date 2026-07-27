@@ -88,7 +88,7 @@ func (s *Server) sopsUnwrap(req ipc.Request) ipc.Response {
 	if rejection != nil {
 		return *rejection
 	}
-	if rejection := s.ensureUnlockedResp(req.ID, p.NoPrompt); rejection != nil {
+	if rejection := s.sopsEnsureUnlocked(req.ID, p.NoPrompt); rejection != nil {
 		return *rejection
 	}
 	id, err := store.FindByRecipient(r)
@@ -177,14 +177,44 @@ func (s *Server) sopsFindError(reqID uint64, r *age.X25519Recipient, err error) 
 		return errResp(reqID, ipc.CodeNoMatch,
 			fmt.Sprintf("sops unwrap: no stored SOPS identity for recipient %s", r))
 	case errors.Is(err, ErrLocked):
-		// The session's TTL can expire between the unlock gate and this read.
-		return errResp(reqID, ipc.CodeLocked, err.Error())
+		// The session's TTL can expire between the unlock gate and this read. Same
+		// situation as the gate, so the same actionable text.
+		return errResp(reqID, ipc.CodeLocked, sopsLockedMsg)
 	default:
 		// An entry in the namespace that will not decode, or a vault that will not
 		// decrypt. SECURITY: the store's errors name the ENTRY only — store.go's decode
 		// never wraps the stored value — so this text is safe to return verbatim.
 		return errResp(reqID, ipc.CodeInternal, err.Error())
 	}
+}
+
+// sopsLockedMsg is what a genuinely locked vault says on the SOPS path, and it is bespoke
+// for one reason: this is the only path whose message reaches a human unedited.
+//
+// ErrLocked's own text — "vault locked: authorization not available" — is accurate and
+// says nothing about what to do next. Everywhere else that does not matter, because
+// cmd/av maps CodeLocked to its own actionable string (main.go:402) and the human reads
+// that one. Here the reader is whoever ran `sops`/`helm secrets`, the text arrives via
+// age-plugin-av, and Task 8 established that the plugin must RELAY rather than invent —
+// so if the advice is not in this string it reaches nobody. Hence it is added here rather
+// than by widening ErrLocked, which other paths and their tests depend on.
+//
+// "ask a human" is deliberate: the caller that sees this set no_prompt, which means it is
+// an agent, and an agent cannot answer a Touch ID. It must also stay DIFFERENT from
+// sopsTierGate's message — that pairing is what stops one substituted string from
+// satisfying two situations that need opposite responses.
+const sopsLockedMsg = `sops unwrap: vault locked — ask a human to run "av unlock"`
+
+// sopsEnsureUnlocked is ensureUnlockedResp with the SOPS path's own locked-vault wording.
+// It defers to the shared gate for the decision and the CodeDenied case (a refused Touch
+// ID is the same event on every RPC) and rewrites only the CodeLocked message.
+func (s *Server) sopsEnsureUnlocked(reqID uint64, noPrompt bool) *ipc.Response {
+	rejection := s.ensureUnlockedResp(reqID, noPrompt)
+	if rejection == nil || rejection.Error == nil || rejection.Error.Code != ipc.CodeLocked {
+		return rejection
+	}
+	r := errResp(reqID, ipc.CodeLocked, sopsLockedMsg)
+	return &r
 }
 
 // sopsTierGate applies decision 5's per-identity access policy and returns a

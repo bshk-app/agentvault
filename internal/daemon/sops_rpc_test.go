@@ -428,6 +428,13 @@ func TestSopsUnwrapRejectsAMalformedRecipient(t *testing.T) {
 // TestSopsUnwrapLockedNoPromptIsLocked: an agent (AV_NO_PROMPT) meeting a locked vault
 // gets CodeLocked immediately and faces no biometric — the exit-69 pause every other
 // command gives it, rather than a machine blocking on a prompt nobody will answer.
+//
+// The MESSAGE is asserted too, because on this path it is the whole user experience.
+// Everywhere else CodeLocked is re-rendered by cmd/av (main.go:402) and ErrLocked's own
+// text is never read by anyone; here it travels through age-plugin-av — which Task 8
+// requires to RELAY, not invent — straight into whatever the user ran `sops` from. If the
+// advice is not in this string, decision 6's promise that the user is told to run
+// `av unlock` is kept by nobody.
 func TestSopsUnwrapLockedNoPromptIsLocked(t *testing.T) {
 	key, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -442,6 +449,14 @@ func TestSopsUnwrapLockedNoPromptIsLocked(t *testing.T) {
 
 	if resp.Error == nil || resp.Error.Code != ipc.CodeLocked {
 		t.Fatalf("resp.Error = %+v, want CodeLocked (%d)", resp.Error, ipc.CodeLocked)
+	}
+	if !strings.Contains(resp.Error.Message, "av unlock") {
+		t.Fatalf("message = %q, want it to name `av unlock` — here the vault really IS locked, and this text is all the user gets", resp.Error.Message)
+	}
+	// The pairing that keeps the two CodeLocked situations honest: this one says "locked",
+	// the dangerous-tier one must not (see TestSopsUnwrapDangerousTierNoPromptIsLocked).
+	if !strings.Contains(resp.Error.Message, "vault locked") {
+		t.Fatalf("message = %q, want it to say the vault is locked", resp.Error.Message)
 	}
 	if p, u := f.auth.counts(); p != 0 || u != 0 {
 		t.Fatalf("NoPrompt spent %d prompts + %d unwraps, want 0 + 0", p, u)
