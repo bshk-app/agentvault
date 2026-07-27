@@ -169,6 +169,50 @@ func TestConfirmSopsReplaceDeclined(t *testing.T) {
 	}
 }
 
+// TestFormatSopsListColumns: one line per identity with its name, tier and PUBLIC recipient,
+// under a header, aligned on the longest name.
+func TestFormatSopsListColumns(t *testing.T) {
+	out := formatSopsList([]ipc.SopsIdentityInfo{
+		sampleInfo("prod-deploy-key", "dangerous"),
+		sampleInfo("work", "normal"),
+	})
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want a header + 2 rows, got %d lines:\n%s", len(lines), out)
+	}
+	if !strings.HasPrefix(lines[0], "NAME") || !strings.Contains(lines[0], "TIER") || !strings.Contains(lines[0], "RECIPIENT") {
+		t.Fatalf("header = %q", lines[0])
+	}
+	// The recipient column starts at the same offset on every row, header included.
+	col := strings.Index(lines[0], "RECIPIENT")
+	for _, l := range lines[1:] {
+		if strings.Index(l, sampleRecipient) != col {
+			t.Fatalf("recipient column misaligned (want %d):\n%s", col, out)
+		}
+	}
+}
+
+// TestFormatSopsListPrintsNoPrivateKey is the property that lets `av sops ls` output be
+// pasted into an issue: it is built from ipc.SopsIdentityInfo, which has no field that can
+// hold a private key, so the AGE-SECRET-KEY-1… prefix cannot appear however it is called.
+// The check is cheap and pins the guarantee at the surface a user actually sees.
+func TestFormatSopsListPrintsNoPrivateKey(t *testing.T) {
+	out := formatSopsList([]ipc.SopsIdentityInfo{sampleInfo("work", "normal")})
+	if strings.Contains(out, "AGE-SECRET-KEY") {
+		t.Fatalf("listing leaked key material:\n%s", out)
+	}
+}
+
+// TestFormatSopsListEmpty: an empty vault is not an error — it says so and names the command
+// that fixes it. `av sops ls` on a fresh install is the likeliest first contact with this
+// surface, so it must not read as a failure.
+func TestFormatSopsListEmpty(t *testing.T) {
+	out := formatSopsList(nil)
+	if !strings.Contains(out, "no SOPS identities") || !strings.Contains(out, "av sops keygen") {
+		t.Fatalf("empty listing = %q", out)
+	}
+}
+
 // TestParseSopsVersion covers the shapes `sops --version` actually prints: bare, with the
 // " (latest)" suffix the online version check adds, and a "v"-prefixed build.
 func TestParseSopsVersion(t *testing.T) {

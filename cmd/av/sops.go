@@ -34,6 +34,8 @@ func runSops(args []string) {
 	switch args[0] {
 	case "keygen":
 		runSopsKeygen(args[1:])
+	case "ls":
+		runSopsLs(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "av: unknown sops command %q\n", args[0])
 		sopsUsage()
@@ -42,7 +44,7 @@ func runSops(args []string) {
 }
 
 func sopsUsage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av sops keygen NAME [--tier normal|dangerous]  (generate a SOPS identity inside the vault)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av sops keygen NAME [--tier normal|dangerous]  (generate a SOPS identity inside the vault)\n  av sops ls")
 }
 
 // sopsKeygenOptions are the parsed args of `av sops keygen`.
@@ -110,6 +112,48 @@ func runSopsKeygen(args []string) {
 		os.Exit(exitForError(err))
 	}
 	fmt.Print(formatSopsCreated(verb, info, config.SopsKeysFilePath()))
+}
+
+// runSopsLs implements `av sops ls`: every stored identity, sorted by name (the daemon
+// sorts, so repeated runs over an unchanged vault do not reshuffle).
+func runSopsLs(args []string) {
+	if len(args) > 0 {
+		fmt.Fprintf(os.Stderr, "av: av sops ls takes no arguments (got %q)\n", args[0])
+		os.Exit(exitBadRequest)
+	}
+	ids, err := dialClient().SopsList()
+	if err != nil {
+		os.Exit(exitForError(err))
+	}
+	fmt.Print(formatSopsList(ids))
+}
+
+// formatSopsList renders the listing: name, tier, recipient, aligned on the longest name.
+// The AGE-PLUGIN-AV-1… pointer is deliberately NOT a column — it is long enough to wrap
+// every row, and the one place it is needed (keys.txt) is served by `av sops identity NAME`,
+// whose output is exactly the line that file wants.
+//
+// SECURITY: every field comes from ipc.SopsIdentityInfo, which has no field that can hold a
+// private key — so this output, which lands in terminals, CI logs and screenshots, cannot
+// contain one.
+func formatSopsList(ids []ipc.SopsIdentityInfo) string {
+	if len(ids) == 0 {
+		return "no SOPS identities yet — create one with: av sops keygen NAME\n"
+	}
+	width := len("NAME")
+	for _, id := range ids {
+		if len(id.Name) > width {
+			width = len(id.Name)
+		}
+	}
+	var b strings.Builder
+	// The tier column is sized for the longest tier there is ("dangerous"), which is a
+	// closed set in sopsplugin — a wider one would have to be added there first.
+	fmt.Fprintf(&b, "%-*s  %-9s  %s\n", width, "NAME", "TIER", "RECIPIENT")
+	for _, id := range ids {
+		fmt.Fprintf(&b, "%-*s  %-9s  %s\n", width, id.Name, id.Tier, id.Recipient)
+	}
+	return b.String()
 }
 
 // sopsCheckReplace runs the SopsList-then-confirm dance shared by keygen and import, and
