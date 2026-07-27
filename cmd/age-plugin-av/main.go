@@ -113,13 +113,34 @@ func (i *daemonIdentity) Unwrap(stanzas []*age.Stanza) ([]byte, error) {
 // maps CodeLocked to its own fixed string and never sees this path, so this is the last
 // layer that can still tell the two apart.
 //
-// The error is formatted, not wrapped. Nothing downstream inspects the chain — the protocol
-// carries err.Error() and nothing else — while %w would let an error that happens to wrap
-// age.ErrIncorrectIdentity be read as "this file is not mine" by the framework's identity
-// loop, turning a refusal a user needs to see into a silent "no identity matched".
+// CodeNoMatch is the ONE code that is not relayed, and it is the reason a keys.txt with
+// more than one AgentVault pointer works at all. age tries identities in sequence and
+// advances to the next ONLY on age.ErrIncorrectIdentity; any other error aborts the whole
+// decrypt. So a hard error for "this identity cannot decrypt this file" means the FIRST
+// pointer decides the outcome for every file — with a personal key and a team key in
+// keys.txt, files encrypted to the second are unreadable. Returning the sentinel makes age
+// fall through, which is the entire behaviour of a plain multi-key keys.txt.
+//
+// This is a code test, never a message test. The daemon sends CodeNoMatch for the two
+// refusals that genuinely mean "try another" and different codes for the rest; matching on
+// prose instead would swallow the very refusals this function exists to surface, since
+// several of them used to share CodeBadRequest.
+//
+// Everything else is formatted, not wrapped. Nothing downstream inspects the chain — the
+// protocol carries err.Error() and nothing else — while %w would let an error that happens
+// to wrap age.ErrIncorrectIdentity be read as "this file is not mine" by the framework's
+// identity loop, turning a refusal a user needs to see into a silent "no identity matched".
 func daemonError(err error) error {
 	var rpc *ipc.RPCError
 	if errors.As(err, &rpc) {
+		if rpc.Code == ipc.CodeNoMatch {
+			// Bare, not wrapped with the daemon's text: age's identity loop discards the
+			// error it continues on, so any message attached here is thrown away rather
+			// than shown. What that costs — a keys.txt whose pointers are ALL stale now
+			// surfaces as age's generic "no identity matched" instead of naming the
+			// recipient — is documented in internal/daemon/sops_rpc.go and Task 12.
+			return age.ErrIncorrectIdentity
+		}
 		// SECURITY: RPCError.Message is the daemon's, which names identities, recipients
 		// (public by construction), and refs — never a value. See internal/daemon/sops_rpc.go.
 		return fmt.Errorf("AgentVault: %s", rpc.Message)

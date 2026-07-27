@@ -328,7 +328,7 @@ func TestSopsUnwrapReturnsTheFileKey(t *testing.T) {
 // including the ones belonging to other teams. Each of those is a sops_unwrap the vault
 // has no key for. If the daemon asked for presence BEFORE deciding whether the file is
 // even ours, that build would be a wall of Touch ID prompts for files it cannot read
-// anyway. So: no match, no prompt, CodeBadRequest — and nothing in the audit log either,
+// anyway. So: no match, no prompt, CodeNoMatch — and nothing in the audit log either,
 // because there is no identity to name.
 func TestSopsUnwrapUnknownRecipientNeverPrompts(t *testing.T) {
 	mine, err := age.GenerateX25519Identity()
@@ -352,12 +352,14 @@ func TestSopsUnwrapUnknownRecipientNeverPrompts(t *testing.T) {
 	if resp.Error == nil {
 		t.Fatalf("unwrap with a recipient we hold no key for succeeded, returning a %d-byte result", len(resp.Result))
 	}
-	if resp.Error.Code != ipc.CodeBadRequest {
-		t.Fatalf("code = %d, want CodeBadRequest (%d)", resp.Error.Code, ipc.CodeBadRequest)
+	// CodeNoMatch, not CodeBadRequest: the caller may hold OTHER pointers, and this answer
+	// must let it try them rather than end the decrypt. See ipc.CodeNoMatch.
+	if resp.Error.Code != ipc.CodeNoMatch {
+		t.Fatalf("code = %d, want CodeNoMatch (%d)", resp.Error.Code, ipc.CodeNoMatch)
 	}
 	// Naming the recipient proves the daemon actually looked, and keeps this test from
-	// passing on any old CodeBadRequest. The recipient is a public key: safe to echo, and
-	// the one datum that tells a user which key the file wants.
+	// passing on any old code. The recipient is a public key: safe to echo, and the one
+	// datum that tells a user which key the file wants.
 	if !strings.Contains(resp.Error.Message, theirs.Recipient().String()) {
 		t.Fatalf("message = %q, want it to name the recipient the file was encrypted to", resp.Error.Message)
 	}
@@ -392,8 +394,8 @@ func TestSopsUnwrapLockedUnknownRecipientCostsTheSessionOpen(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		resp := f.unwrap(t, theirs.Recipient(), stanzas, false)
-		if resp.Error == nil || resp.Error.Code != ipc.CodeBadRequest {
-			t.Fatalf("call %d: resp.Error = %+v, want CodeBadRequest", i, resp.Error)
+		if resp.Error == nil || resp.Error.Code != ipc.CodeNoMatch {
+			t.Fatalf("call %d: resp.Error = %+v, want CodeNoMatch", i, resp.Error)
 		}
 	}
 	if p, u := f.auth.counts(); p != 0 || u != 1 {
@@ -444,6 +446,51 @@ func TestSopsUnwrapLockedNoPromptIsLocked(t *testing.T) {
 	if p, u := f.auth.counts(); p != 0 || u != 0 {
 		t.Fatalf("NoPrompt spent %d prompts + %d unwraps, want 0 + 0", p, u)
 	}
+}
+
+// TestSopsUnwrapWrongKeyIsNoMatchNotBadRequest is the daemon half of the multi-key fix.
+//
+// A keys.txt with two AgentVault pointers — the personal-key-plus-team-key setup
+// `av sops import` produces — sends one sops_unwrap per pointer, and for any given file
+// one of them holds the wrong key. That answer must be CodeNoMatch, because age advances
+// to the next identity ONLY on age.ErrIncorrectIdentity and age-plugin-av derives that
+// solely from the code. As CodeBadRequest it was a hard error, so the first pointer
+// decided every file and the second key's files were unreadable.
+//
+// It is pinned separately from the malformed-header case below because the two now differ
+// by CODE and not merely by wording: this one means "try another", that one means "stop".
+func TestSopsUnwrapWrongKeyIsNoMatchNotBadRequest(t *testing.T) {
+	mine, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newSopsFixture(t)
+	f.seed(t, "mykey", mine, sopsplugin.TierNormal)
+	f.open(t)
+
+	// Stored key, well-formed header — but the file was encrypted to the OTHER key. The
+	// recipient asked for is the stored one, so this reaches Unwrap rather than stopping at
+	// FindByRecipient: this is the ErrIncorrectIdentity half of CodeNoMatch.
+	_, stanzas, _ := sopsFile(t, theirs, "the other key's file")
+	resp := f.unwrap(t, mine.Recipient(), stanzas, false)
+
+	if resp.Error == nil {
+		t.Fatalf("unwrapping another key's file succeeded, returning a %d-byte result", len(resp.Result))
+	}
+	if resp.Error.Code != ipc.CodeNoMatch {
+		t.Fatalf("code = %d, want CodeNoMatch (%d) — as anything else, a two-pointer keys.txt cannot decrypt this file at all", resp.Error.Code, ipc.CodeNoMatch)
+	}
+	if !strings.Contains(resp.Error.Message, "mykey") {
+		t.Fatalf("message = %q, want it to name the identity that could not unwrap", resp.Error.Message)
+	}
+	if strings.Contains(resp.Error.Message, mine.String()) {
+		t.Fatalf("error leaked a private key: %q", resp.Error.Message)
+	}
+	assertAuditDetails(t, f.log)
 }
 
 // TestSopsUnwrapLockedPromptsOnceThenSucceeds: a human at a TTY meeting a locked vault
@@ -629,11 +676,12 @@ func TestSopsUnwrapDangerousFromLockedCostsTwoChecks(t *testing.T) {
 // TestSopsUnwrapCorruptEntryIsInternalNotUnknown: a junk entry in the namespace and a
 // recipient nobody holds are DIFFERENT failures and must report differently.
 //
-// The distinction is the user-facing point of Task 4's tolerant scan. "this file isn't
-// yours" (CodeBadRequest) sends someone looking for the right key; "your vault has an
-// entry that will not parse" (CodeInternal) sends them to `av sops ls`. Collapsing the
-// two would make a broken vault look exactly like a foreign file — for a key sitting
-// right there.
+// The distinction is the user-facing point of Task 4's tolerant scan, and CodeNoMatch
+// sharpened it: "this key is not in the vault" is a FALL-THROUGH the caller answers by
+// trying its next pointer, while "your vault has an entry that will not parse"
+// (CodeInternal) is a hard stop that sends someone to `av sops ls`. Collapsing the two
+// would make a broken vault look exactly like a foreign file — for a key sitting right
+// there — and, now, would silently swallow it as age's "no identity matched".
 func TestSopsUnwrapCorruptEntryIsInternalNotUnknown(t *testing.T) {
 	theirs, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -644,8 +692,8 @@ func TestSopsUnwrapCorruptEntryIsInternalNotUnknown(t *testing.T) {
 	clean := newSopsFixture(t)
 	clean.open(t)
 	cleanResp := clean.unwrap(t, theirs.Recipient(), stanzas, false)
-	if cleanResp.Error == nil || cleanResp.Error.Code != ipc.CodeBadRequest {
-		t.Fatalf("clean vault, unknown recipient: %+v, want CodeBadRequest", cleanResp.Error)
+	if cleanResp.Error == nil || cleanResp.Error.Code != ipc.CodeNoMatch {
+		t.Fatalf("clean vault, unknown recipient: %+v, want CodeNoMatch", cleanResp.Error)
 	}
 
 	broken := newSopsFixture(t)
@@ -762,8 +810,10 @@ func TestSopsUnwrapErrorsCarryNoKeyMaterial(t *testing.T) {
 			t.Fatalf("error leaked a private key: %q", resp.Error.Message)
 		}
 	}
-	if mismatch.Error.Code != ipc.CodeBadRequest {
-		t.Fatalf("stanzas from another file: code = %d, want CodeBadRequest", mismatch.Error.Code)
+	// CodeNoMatch: see TestSopsUnwrapWrongKeyIsNoMatchNotBadRequest for why the code, not
+	// just the wording, is what a multi-pointer keys.txt depends on.
+	if mismatch.Error.Code != ipc.CodeNoMatch {
+		t.Fatalf("stanzas from another file: code = %d, want CodeNoMatch", mismatch.Error.Code)
 	}
 	if !strings.Contains(mismatch.Error.Message, "mykey") {
 		t.Fatalf("message = %q, want it to name the identity that could not unwrap", mismatch.Error.Message)
@@ -778,8 +828,12 @@ func TestSopsUnwrapErrorsCarryNoKeyMaterial(t *testing.T) {
 // age reports "no stanza matched this key" and "this is not a stanza" as different errors,
 // and only the first is ErrIncorrectIdentity — so mapping "everything else" to
 // CodeInternal tells a user with a truncated SOPS header that the daemon broke, and hands
-// any client a way to mint an internal error on demand. Both are CodeBadRequest; the
-// message, not the code, is what separates them.
+// any client a way to mint an internal error on demand.
+//
+// It is CodeBadRequest and NOT CodeNoMatch, which is the second half of the same point:
+// trying the next identity cannot fix a header that is not a header, so this one must stop
+// the decrypt and be shown. Falling through would bury a corrupt file under age's generic
+// "no identity matched" and send the user hunting for a key that was never the problem.
 func TestSopsUnwrapMalformedStanzaIsBadRequestNotInternal(t *testing.T) {
 	key, err := age.GenerateX25519Identity()
 	if err != nil {

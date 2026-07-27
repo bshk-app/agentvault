@@ -623,6 +623,12 @@ git commit -m "test: add the SOPS real-tool smoke script"
 
 Be accurate about scope in `docs/security-model.md`. This protects the key from `sops`, `helm`, `kustomize`, and everything else in the process tree. It does **not** protect the decrypted *output* — `helm secrets` still writes plaintext values into temporary files, and that is outside AgentVault's boundary. Say so plainly rather than let a reader infer more than the feature delivers.
 
+**Two things Task 8's review settled that `docs/sops.md` must state:**
+
+*Mixed and multi-key `keys.txt` works.* Several AgentVault pointers, or AgentVault pointers sitting alongside plain `AGE-SECRET-KEY-1…` lines, all decrypt — the ordinary personal-key-plus-team-key setup `av sops import` produces. Each identity that cannot open a given file steps aside and age tries the next, which is what an all-plain `keys.txt` already does. This is worth saying because it did not work before `ipc.CodeNoMatch` (design decision 7): every AgentVault refusal was a hard error, so the *first* pointer decided the outcome for every file and files encrypted to the second key were unreadable.
+
+*One diagnostic was traded away for it — document the recovery.* A **stale pointer** (the key was removed from the vault but its line stayed in `keys.txt`) is now indistinguishable from an ordinary "not my file", so it falls through silently instead of naming itself. Beside a working pointer that is invisible and correct. As the *only* pointer, the user sees age's generic `no identity matched any of the recipients` rather than the daemon's `no stored SOPS identity for recipient age1…`. Troubleshooting must therefore list this failure and point at **`av sops ls`** — which prints the names and recipients actually held — as the way to tell "my `keys.txt` is stale" from "this file genuinely isn't mine". The plugin `msg` command cannot recover it (see decision 7 for why), so the docs are the whole mitigation.
+
 ```bash
 git commit -am "docs: document the SOPS age-plugin integration"
 ```

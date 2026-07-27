@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -160,14 +161,19 @@ func encryptTo(t *testing.T, r *age.X25519Recipient, payload string) []byte {
 	return ct.Bytes()
 }
 
-// decryptThroughPlugin decrypts ct with an AGE-PLUGIN-AV-1... identity naming r, which
-// makes age exec the real age-plugin-av off PATH and speak identity-v1 to it. It is the
-// full production path minus sops itself.
+// decryptThroughPlugin decrypts ct with one AGE-PLUGIN-AV-1... identity per recipient in
+// rs, which makes age exec the real age-plugin-av off PATH and speak identity-v1 to it. It
+// is the full production path minus sops itself.
+//
+// rs is variadic because the ORDER and COUNT are the subject of a test: age tries
+// identities in sequence and gives up on the first hard error, so passing two models a
+// keys.txt with two AgentVault pointers — the ordinary personal-key-plus-team-key setup
+// `av sops import` produces — and proves the first one's refusal does not decide the file.
 //
 // The wait is BOUNDED. A plugin that blocks on a presence prompt is the failure mode this
 // binary exists to avoid, and an unbounded wait would report it as a hung test suite ten
 // minutes later instead of as the bug it is.
-func decryptThroughPlugin(t *testing.T, ct []byte, r *age.X25519Recipient) (string, error) {
+func decryptThroughPlugin(t *testing.T, ct []byte, rs ...*age.X25519Recipient) (string, error) {
 	t.Helper()
 
 	// Every UI callback errors. The plugin must never interact — that is the point of
@@ -184,9 +190,13 @@ func decryptThroughPlugin(t *testing.T, ct []byte, r *age.X25519Recipient) (stri
 			return false, fmt.Errorf("unexpected confirmation request from plugin %q", name)
 		},
 	}
-	id, err := plugin.NewIdentity(sopsplugin.EncodeIdentity(r), ui)
-	if err != nil {
-		t.Fatal(err)
+	ids := make([]age.Identity, 0, len(rs))
+	for _, r := range rs {
+		id, err := plugin.NewIdentity(sopsplugin.EncodeIdentity(r), ui)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
 	}
 
 	type outcome struct {
@@ -197,7 +207,7 @@ func decryptThroughPlugin(t *testing.T, ct []byte, r *age.X25519Recipient) (stri
 	// a send nobody will receive.
 	done := make(chan outcome, 1)
 	go func() {
-		out, decErr := age.Decrypt(bytes.NewReader(ct), id)
+		out, decErr := age.Decrypt(bytes.NewReader(ct), ids...)
 		if decErr != nil {
 			done <- outcome{err: decErr}
 			return
@@ -229,6 +239,7 @@ func TestAgePluginAvEndToEnd(t *testing.T) {
 	}
 	sock, recipients := buildAndSeed(t, map[string]sopsplugin.Tier{
 		"e2e":  sopsplugin.TierNormal,
+		"team": sopsplugin.TierNormal, // the second pointer of an ordinary two-key keys.txt
 		"prod": sopsplugin.TierDangerous,
 	})
 	cl := client.New(sock)
@@ -299,10 +310,45 @@ func TestAgePluginAvEndToEnd(t *testing.T) {
 		}
 	})
 
-	// The mangled-keys.txt case, and the evidence for NOT parsing the identity payload
-	// locally: the daemon's own message reaches the caller intact, naming the recipient
-	// (a public key) the file wants.
-	t.Run("unknown recipient relays the daemon's message", func(t *testing.T) {
+	// THE MULTI-KEY CASE, and the one that decides whether an ordinary two-key keys.txt
+	// works at all. `av sops import` writes one pointer per key, so a developer with a
+	// personal key and a team key has two — and any given file is encrypted to one of them.
+	//
+	// age tries identities in order and advances ONLY on age.ErrIncorrectIdentity; every
+	// other error aborts the decrypt outright. So the first pointer's "no stanza in this
+	// file was encrypted to it" must arrive as a fall-through, not as a hard error. Before
+	// CodeNoMatch it arrived as CodeBadRequest, the plugin relayed it as a hard error, and
+	// this file was simply unreadable.
+	//
+	// The file is encrypted to "team" ALONE, so "e2e" has to refuse it and age has to keep
+	// going. Order is explicit rather than incidental: with the working key first, a
+	// regression here would never be reached.
+	t.Run("two keys.txt pointers decrypt a file encrypted to only the second", func(t *testing.T) {
+		if err := cl.Unlock(); err != nil {
+			t.Fatalf("unlock: %v", err)
+		}
+		teamCT := encryptTo(t, recipients["team"], payload)
+
+		got, err := decryptThroughPlugin(t, teamCT, recipients["e2e"], recipients["team"])
+		if err != nil {
+			t.Fatalf("a two-pointer keys.txt failed to decrypt a file encrypted to the second key: %v", err)
+		}
+		if got != payload {
+			t.Fatalf("got %q, want %q", got, payload)
+		}
+	})
+
+	// The other half of CodeNoMatch, and the mangled-keys.txt case: a pointer naming a key
+	// this vault does not hold. Unlike the subtest above it is a property of the POINTER,
+	// not of the file — it refuses every file identically — so it must not veto the pointers
+	// beside it either.
+	//
+	// The second assertion records what that costs, because it is a real loss and not an
+	// oversight: with the stale pointer ALONE, the daemon's message naming the missing
+	// recipient no longer reaches the user. age's identity loop discards the error it falls
+	// through on, so nothing the plugin returns on this path can be displayed. The user sees
+	// age's generic text and recovers with `av sops ls`.
+	t.Run("a stale pointer falls through instead of vetoing the others", func(t *testing.T) {
 		if err := cl.Unlock(); err != nil {
 			t.Fatalf("unlock: %v", err)
 		}
@@ -310,15 +356,29 @@ func TestAgePluginAvEndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		strangerCT := encryptTo(t, stranger.Recipient(), payload)
 
+		got, err := decryptThroughPlugin(t, normalCT, stranger.Recipient(), recipients["e2e"])
+		if err != nil {
+			t.Fatalf("a stale keys.txt pointer aborted a decrypt the live pointer could serve: %v", err)
+		}
+		if got != payload {
+			t.Fatalf("got %q, want %q", got, payload)
+		}
+
+		// Alone, it fails — and as age's own "no identity matched", not as the daemon's
+		// message. This is the diagnostic the fall-through trades away, asserted so the
+		// trade stays deliberate rather than becoming a surprise.
+		strangerCT := encryptTo(t, stranger.Recipient(), payload)
 		_, err = decryptThroughPlugin(t, strangerCT, stranger.Recipient())
 		if err == nil {
 			t.Fatal("an identity this vault holds no key for must not decrypt")
 		}
-		want := "AgentVault: sops unwrap: no stored SOPS identity for recipient " + stranger.Recipient().String()
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("unknown-recipient error = %q, want it to carry %q", err, want)
+		var noMatch *age.NoIdentityMatchError
+		if !errors.As(err, &noMatch) {
+			t.Fatalf("error = %q, want age's NoIdentityMatchError — a fall-through, not a relayed refusal", err)
+		}
+		if strings.Contains(err.Error(), "no stored SOPS identity") {
+			t.Fatalf("error = %q: the daemon's message reached the user, so this was NOT a fall-through", err)
 		}
 	})
 }

@@ -110,35 +110,43 @@ func (s *Server) sopsUnwrap(req ipc.Request) ipc.Response {
 	// appears in a tool's output.
 	fileKey, err := id.Key.Unwrap(stanzas)
 	if err != nil {
-		// BOTH outcomes below are CodeBadRequest, because both are the CALLER's fault.
-		// id.Key was parsed out of the store before this line, so the only input that
-		// varies here is p.Stanzas: age refuses because the header it was handed does not
-		// fit the key, never because the daemon is broken. Reporting a truncated SOPS
-		// header as CodeInternal ("the daemon broke") sends a user looking in the wrong
-		// place, and it lets any client mint an internal error at will. CodeInternal on
-		// this RPC stays for the genuine daemon faults ABOVE — an unregistered vault, a
-		// store entry that will not decode — which no request can provoke.
+		// NEITHER outcome below is a daemon fault. id.Key was parsed out of the store before
+		// this line, so the only input that varies here is p.Stanzas: age refuses because the
+		// header it was handed does not fit the key, never because the daemon is broken.
+		// Reporting a truncated SOPS header as CodeInternal ("the daemon broke") sends a user
+		// looking in the wrong place, and it lets any client mint an internal error at will.
+		// CodeInternal on this RPC stays for the genuine daemon faults ABOVE — an unregistered
+		// vault, a store entry that will not decode — which no request can provoke.
 		//
-		// The MESSAGE still tells the two apart, because they send a user somewhere
-		// different. The default: the stored key matched the recipient we were ASKED for,
-		// but no stanza in this file was encrypted to it — a keys.txt pointing at the wrong
-		// one of two keys, or stanzas from another file. The file stays unreadable.
+		// They differ in the one way a CALLER can act on, which is why they differ by CODE
+		// and not merely by wording. The default is the ORDINARY outcome of a keys.txt with
+		// more than one AgentVault pointer in it: the stored key matched the recipient we were
+		// ASKED for, but no stanza in this file was encrypted to it, because the file belongs
+		// to the user's OTHER key. That is "try the next identity", so it is CodeNoMatch —
+		// age-plugin-av turns it into age.ErrIncorrectIdentity and age moves on. Sent as
+		// CodeBadRequest it aborted the whole decrypt, and a two-key keys.txt could not read
+		// files encrypted to the second key at all.
 		//
 		// SECURITY: id.Name, never id — Identity.String() exists to stop %v from rendering
 		// the private key, and reaching past it is exactly the mistake it prevents.
+		code := ipc.CodeNoMatch
 		detail := "no matching stanza"
 		msg := fmt.Sprintf("sops unwrap %q: no stanza in this file was encrypted to it", id.Name)
 		if !errors.Is(err, age.ErrIncorrectIdentity) {
 			// Not "the wrong key" but "not a stanza": an arg that is not base64, a
 			// recipient block of the wrong length, a body that cannot hold a file key
 			// (age's x25519.go:166-192). A truncated header reads exactly like this.
+			// It stays CodeBadRequest — and so stays a HARD error — because trying the next
+			// identity cannot fix a header that is not a header, and falling through would
+			// bury a corrupt file under age's generic "no identity matched".
+			code = ipc.CodeBadRequest
 			detail = "malformed stanza"
 			msg = fmt.Sprintf("sops unwrap %q: the file's header stanzas are malformed", id.Name)
 		}
 		s.sopsAudit(id, detail)
 		// SECURITY: age's error is NOT wrapped. Its text is secret-free today, but the
 		// file key is live in this frame and an error string is the easiest way out.
-		return errResp(req.ID, ipc.CodeBadRequest, msg)
+		return errResp(req.ID, code, msg)
 	}
 	s.sopsAudit(id, "ok")
 	res, _ := json.Marshal(ipc.SopsUnwrapResult{FileKey: fileKey})
@@ -151,15 +159,22 @@ func (s *Server) sopsUnwrap(req ipc.Request) ipc.Response {
 func (s *Server) sopsFindError(reqID uint64, r *age.X25519Recipient, err error) ipc.Response {
 	switch {
 	case errors.Is(err, backend.ErrNotFound):
-		// The common case in a large repo: a file this vault holds no key for. It costs
-		// no presence check (see the ordering note above) and writes NO audit entry —
-		// there is no identity to name, and one line per foreign file would drown the log
-		// in exactly the situation where the log matters least.
+		// This vault holds no key under the recipient the CALLER named. Unlike the unwrap
+		// failure below it says nothing about the file: the recipient comes from the
+		// keys.txt line, not from the header, so this outcome is a property of the pointer
+		// and is the same for every file the caller tries. It costs no presence check (see
+		// the ordering note above) and writes NO audit entry — there is no identity to name.
+		//
+		// CodeNoMatch, so a keys.txt holding a stale AgentVault pointer beside a live one
+		// still decrypts through the live one instead of aborting on the stale one. The
+		// COST of that is real and is accepted deliberately: when EVERY pointer is stale,
+		// this message no longer reaches the user — age reports its generic "no identity
+		// matched" instead. `av sops ls` is the recovery, and Task 12 documents it.
 		//
 		// SECURITY: the message names the RECIPIENT, which is a public key by
 		// construction (design decision 3) and the one datum that tells a user which key
 		// the file actually wants.
-		return errResp(reqID, ipc.CodeBadRequest,
+		return errResp(reqID, ipc.CodeNoMatch,
 			fmt.Sprintf("sops unwrap: no stored SOPS identity for recipient %s", r))
 	case errors.Is(err, ErrLocked):
 		// The session's TTL can expire between the unlock gate and this read.

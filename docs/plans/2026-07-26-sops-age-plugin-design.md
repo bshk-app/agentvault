@@ -164,6 +164,53 @@ session is open and `av unlock` changes nothing. A fixed "run `av unlock`" makes
 a loop, and the plugin is the last layer that could have told them apart. The text above
 remains what the daemon sends for a genuinely locked session.
 
+### 7. "Try the next identity" is a wire code, not a phrase — `CodeNoMatch`
+
+*Added by Task 8's review, which found that a two-key `keys.txt` could not decrypt at all.*
+
+`age.Decrypt` tries identities in sequence and advances to the next one **only** on
+`age.ErrIncorrectIdentity`; any other error aborts the whole decrypt. Decision 6 has the
+plugin relay every daemon refusal as a hard error — so with two AgentVault pointers in
+`keys.txt` and a file encrypted to the second key, the first identity's *"no stanza in this
+file was encrypted to it"* ended the decrypt and the second was never tried. That is not an
+edge case: it is a personal key plus a team key, and `av sops import` imports both.
+
+The fix cannot be message matching. *"no stored SOPS identity for recipient…"* and *"no
+stanza in this file was encrypted to it"* both arrived as `CodeBadRequest`, alongside
+refusals that must NOT fall through, and sniffing prose to tell them apart would swallow the
+very messages decision 6 exists to surface. So the distinction moves onto the wire:
+
+**`ipc.CodeNoMatch` (7) means "this identity cannot decrypt this file; try another."** The
+daemon returns it for the two refusals that mean exactly that, and nothing else:
+
+| Situation | Code | Plugin behaviour |
+| --- | --- | --- |
+| Recipient names no stored identity (`backend.ErrNotFound`) | `CodeNoMatch` | fall through |
+| Stored identity decrypts no stanza in this file (`age.ErrIncorrectIdentity`) | `CodeNoMatch` | fall through |
+| Header stanzas malformed / recipient unparseable | `CodeBadRequest` | hard error, shown |
+| Vault locked, or dangerous tier under `no_prompt` | `CodeLocked` | hard error, shown |
+| Presence denied | `CodeDenied` | hard error, shown |
+| Corrupt vault entry, unregistered backend | `CodeInternal` | hard error, shown |
+
+`age-plugin-av` maps `CodeNoMatch` — and only `CodeNoMatch` — to `age.ErrIncorrectIdentity`.
+Everything else is still relayed verbatim under the `AgentVault: ` prefix.
+
+**What this costs, accepted deliberately.** A *stale* pointer — the key was deleted from the
+vault but its line stayed in `keys.txt` — is `ErrNotFound`, so it now falls through
+silently. When it sits beside a live pointer that is exactly right. When it is the *only*
+pointer, the daemon's message naming the missing recipient no longer reaches the user: age's
+identity loop discards the error it falls through on, so the user sees age's generic *"no
+identity matched any of the recipients"* instead. `av sops ls` is the recovery.
+
+The `msg` protocol command cannot buy the diagnostic back. It exists
+(`plugin.Plugin.DisplayMessage`) and may be called from `Unwrap`, but the plugin has no way
+to know which kind of no-match it is holding — that is precisely what one shared code
+erases — and emitting on both would print a line per file per identity during every
+`kustomize build` over a repo of other teams' secrets, which is the noise decision 5 exists
+to prevent. It also fails closed in the wrong direction: a client that cannot display the
+message sets the framework's `broken` flag, which aborts the run the fall-through was meant
+to keep alive. Correctness first; the diagnostic is documented instead.
+
 ## Architecture
 
 ```

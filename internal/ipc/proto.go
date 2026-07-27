@@ -37,6 +37,15 @@ const (
 	CodeDenied       = 4 // dangerous-tier denied / no presence
 	CodeUnauthorized = 5 // peer-credential check failed
 	CodeRateLimited  = 6 // issuance rate limit tripped — mass enumeration forced a relock
+	// CodeNoMatch says "this identity cannot decrypt this file; try another". It is the
+	// ONLY code a caller iterating over identities may treat as fall-through, and it exists
+	// because prose cannot carry that decision: the sops path has two refusals that mean
+	// "try another" and three that mean "stop", and before this code all five arrived as
+	// CodeBadRequest, distinguishable only by their wording. age-plugin-av maps it to
+	// age.ErrIncorrectIdentity so age advances to the next identity in keys.txt; every
+	// other code stays a hard error the user is shown. Sniffing message text instead would
+	// swallow the very refusals the plugin exists to surface.
+	CodeNoMatch = 7
 )
 
 // ResolveParams is the client request for `resolve`. The thin av sends the raw
