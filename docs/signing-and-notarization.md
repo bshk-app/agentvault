@@ -17,7 +17,8 @@ unless the binary carries `com.apple.application-identifier` **authorized by an 
 provisioning profile** — and a bare Mach-O has nowhere to hold a profile.
 
 **Only `avd` touches the Enclave.** So only `avd` is wrapped in an app-like bundle with a
-profile; `av` ships as a bare, signed binary.
+profile; `av` and `age-plugin-av` ship as bare, signed binaries — neither calls `SecKey`
+(they ask `avd` over the socket), so neither needs entitlements or a profile.
 
 ## One-time Apple setup
 
@@ -69,8 +70,9 @@ Inputs it expects:
   `app.bshk.agentvault` (must match the entitlement suffix).
 - `packaging/agentvault.provisionprofile` — your downloaded Developer ID profile.
 
-Output (under `dist/`, git-ignored): a signed bare `av`, a signed+stapled
-`AgentVault.app` (containing `avd`), and `agentvault-v0.3.0-macos.tar.gz` + its sha256.
+Output (under `dist/`, git-ignored): signed bare `av` and `age-plugin-av`, a
+signed+stapled `AgentVault.app` (containing `avd`), and `agentvault-v0.3.0-macos.tar.gz`
++ its sha256.
 
 ## Distribution: a Cask, not the Formula
 

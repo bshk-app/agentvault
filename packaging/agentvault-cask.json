@@ -6,7 +6,7 @@
   "appBundle": "AgentVault.app",
   "dependsOnMacOS": true,
   "livecheck": false,
-  "binary": ["av"],
+  "binary": ["av", "age-plugin-av"],
   "zapTrash": [
     "~/.config/agentvault",
     "~/Library/Caches/agentvault",
