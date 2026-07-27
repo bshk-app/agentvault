@@ -184,10 +184,9 @@ sops -d secrets.enc.yaml         # unchanged — one presence check per command,
 recipient for `.sops.yaml` and the pointer for `keys.txt`.
 
 Requires **sops 3.10+** (where age plugin support landed) and `age-plugin-av` on `PATH`
-beside `av`. **`brew install` does not ship the plugin yet** — the Formula lives in an
-external tap and still installs only `av` and `avd`. A `dangerous`-tier identity costs a
-fresh presence check per file; `normal` (the default) costs one per command. `av sops ls` is
-also the recovery when `sops` reports `no identity matched any of the recipients`.
+beside `av` — the Cask installs it. A `dangerous`-tier identity costs a fresh presence
+check per file; `normal` (the default) costs one per command. `av sops ls` is also the
+recovery when `sops` reports `no identity matched any of the recipients`.
 
 CI proves the plugin itself: Go tests spawn a real `avd`, have age exec the real
 `age-plugin-av`, and decrypt a standard `age1` file and a mixed multi-key `keys.txt` through

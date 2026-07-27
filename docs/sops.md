@@ -416,21 +416,16 @@ Windows product needs Windows Hello implemented first.
 The security property behind (1) — owner-only files — also still needs a real expression on
 Windows via ACLs. Both remain open risks, and neither is something a test can assert today.
 
-### For maintainers: the Formula still omits the plugin
+### How the plugin reaches an installed machine
 
-`brew install` resolves to a Formula in the external tap **`bshk-app/homebrew-tap`**, which
-this repository does not contain. Until that tap's `bin.install` names `age-plugin-av`, a
-Formula install produces a working `av`, a working `avd`, and **no plugin** — and the
-failure that follows reads like a key problem, not a missing file. This is a release blocker
-for the SOPS feature.
+The signed **Cask** is the live distribution path. `zamokctl` renders
+`Casks/agentvault.rb` from `packaging/agentvault-cask.json` on every release and pushes it
+to `bshk-app/homebrew-tap`, so listing `age-plugin-av` in that metadata — which this branch
+does — is the whole change. Nothing needs doing by hand in the tap.
 
-Everything inside this repository is done: the `Makefile`, `scripts/release-signed.sh`, and
-`packaging/agentvault-cask.json` all build and ship the binary, and both CI workflows
-delegate to the release script and name no binary.
+The `Formula` in `beshkenadze/homebrew-tap` is a legacy artifact: last updated 2026-06-19 at
+v0.2.4, from before the project moved to signed Cask distribution. It builds only `av` and
+`avd`, and it also predates the plugin entirely, so it is stale for reasons much larger than
+this feature. `README.md` still points `brew install` at it, which is worth revisiting
+independently of SOPS.
 
-> **Tap naming, unresolved.** `README.md` tells users `brew install
-> beshkenadze/tap/agentvault`, while `docs/getting-started.md`,
-> `docs/signing-and-notarization.md`, `docs/gitea-cicd.md`, and both CI workflows all name
-> `bshk-app/homebrew-tap` — the tap that actually holds the Formula. The README may be an
-> intentional alias; it has been left alone deliberately. Someone should confirm which is
-> correct and make the two agree.
