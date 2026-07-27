@@ -23,6 +23,7 @@ This README is the one-page overview and reference. For step-by-step guides see
 
 - [Getting started](docs/getting-started.md) — install → daemon → first secret → `av run`
 - [Agent integration](docs/agent-integration.md) — wire AgentVault into Claude Code / any agent
+- [SOPS](docs/sops.md) — broker your SOPS age key: import, `.sops.yaml`, rotation, troubleshooting
 - [Security model](docs/security-model.md) — threat model, guarantees, identity tiers
 - [Platform support](docs/platforms.md) — Linux/Windows prerequisites and current gaps
 - [Troubleshooting](docs/troubleshooting.md) — native prompts, locked vault, version skew, exit codes
@@ -159,6 +160,38 @@ If your self-hosted server uses a self-signed TLS certificate, set `NODE_EXTRA_C
 for the `bw` process. AgentVault does not store or refresh `BW_SESSION`; it only invokes
 the already configured `bw` CLI.
 
+## SOPS
+
+`age-plugin-av` brokers your SOPS age key the way `av run` brokers an environment variable.
+The key moves into the vault, `keys.txt` keeps an `AGE-PLUGIN-AV-1…` **pointer**, and `sops`
+asks `avd` to unwrap each file — so the key is never plaintext on disk, never in `environ`,
+and never in the memory of `sops`, `helm`, or `kustomize`.
+
+Files keep their ordinary `age1…` recipients and `.sops.yaml` is untouched, so teammates,
+CI, and Flux read the same files with the same keys.
+
+```sh
+av sops import                   # move keys.txt into the vault, leaving a pointer
+av sops keygen work              # or start fresh: a key that never touches disk
+av sops ls                       # what the vault holds: name, tier, recipient
+sops -d secrets.enc.yaml         # unchanged — one presence check per command, not per file
+```
+
+`import` rewrites `keys.txt` for you; `keygen` prints the two lines to place — the `age1…`
+recipient for `.sops.yaml` and the pointer for `keys.txt`.
+
+Requires **sops 3.10+** (where age plugin support landed) and `age-plugin-av` on `PATH`
+beside `av`. **`brew install` does not ship the plugin yet** — the Formula lives in an
+external tap and still installs only `av` and `avd`. A `dangerous`-tier identity costs a
+fresh presence check per file; `normal` (the default) costs one per command. `av sops ls` is
+also the recovery when `sops` reports `no identity matched any of the recipients`.
+
+`sops -d`, `sops updatekeys`, and a mixed multi-key `keys.txt` are verified against a real
+`sops`. **`helm secrets` and `kustomize`+ksops are untested** — they are ordinary `sops`
+callers and are expected to work, but no run has proven it. See the
+[SOPS guide](docs/sops.md) for the walkthrough, the rotation flow, troubleshooting, and what
+brokering the key does *not* protect.
+
 ## Manifest (`agentvault.yaml`)
 
 A manifest maps logical environment names to a backend reference and an access tier,
@@ -188,6 +221,11 @@ av env [--env-file PATH] [--profile P] [--no-mask] -- cmd args...   run cmd with
 av read [--backend file|--profile P] NAME   print one secret to a TTY only (default: av://file/NAME, no manifest)
 av add [--backend file] NAME            store a value (hidden prompt or stdin; never argv)
 av rm  [--backend file] NAME            delete a value from the writable vault
+av sops keygen NAME [--tier normal|dangerous]   generate a SOPS identity inside the vault
+av sops import [--from PATH] [--name NAME]      move existing age keys out of keys.txt into the vault
+av sops ls                              stored SOPS identities: name, tier, recipient
+av sops recipient NAME | av sops identity NAME  the age1… for .sops.yaml / the pointer for keys.txt
+av sops rm NAME [--force]               DESTRUCTIVE: files encrypted to it become unreadable
 av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]   provision the vault + register avd at login
 av service on|off|status                start avd at login via the native per-user service manager
 av init --agent claude-code|generic [--dir D] [--force]   generate adapter files
@@ -271,6 +309,9 @@ tests — verify them manually:
 - `scripts/smoke-e2e.sh` — isolated end-to-end of the age-file backend (stub presence,
   ephemeral daemon and vault; no Touch ID).
 - `scripts/smoke-backends.sh` — real Keychain (and optional 1Password) resolution.
+- `scripts/smoke-sops.sh` — the real `sops` / `helm secrets` / `kustomize`+ksops toolchain
+  against `age-plugin-av` (ephemeral daemon and vault; skips each tool it cannot find,
+  and reports skips separately so one never reads as a pass).
 - `scripts/manual-touchid-smoke.sh` — the human-in-the-loop Touch ID / auto-lock check.
 - `docs/launchagent.md` — running `avd` at login and the `av service` login-item
   verification checklist.

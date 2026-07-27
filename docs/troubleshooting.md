@@ -125,6 +125,27 @@ channel is covered and a value still leaked, that is a security bug — see
 
 See [agent integration](agent-integration.md#wire-the-hook-posttooluse).
 
+## `sops` can't decrypt through AgentVault
+
+`sops` reports "Recovery failed because no master key could be found", or `no identity
+matched any of the recipients`.
+
+**Read the whole error box.** `sops` word-wraps it, so the line that names the real problem
+arrives split across two rows with the box rule between them — a plain `grep` for it never
+matches. Join the lines first:
+
+```sh
+sops -d secrets.enc.yaml 2>&1 | tr '\n' ' ' | tr -d '|' | tr -s ' '
+```
+
+`"av" plugin not found: exec: "age-plugin-av": executable file not found in $PATH` and `no
+identity matched any of the recipients` sit under the same generic summary and are easy to
+confuse. They are different failures: the first means age never started the plugin, the
+second means the plugin ran and rejected every stanza. For the second, `av sops ls` tells a
+stale pointer from a file that genuinely is not yours.
+
+Full symptom table in [the SOPS guide](sops.md#troubleshooting).
+
 ## Test-only env vars leaked into real use
 
 `AV_TEST_AUTH`, `AV_TEST_ENCLAVE`, and `AV_TEST_KEYSTORE` select stubbed presence /

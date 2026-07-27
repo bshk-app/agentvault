@@ -12,6 +12,7 @@ These guides go deeper, task by task.
 |-------|---------------------------|
 | [Getting started](getting-started.md) | install, provision the vault (avd starts at login), store your first secret, and run a command with it — step by step |
 | [Agent integration](agent-integration.md) | wire AgentVault into Claude Code (or any agent) so its output is redacted automatically |
+| [SOPS](sops.md) | move your SOPS age key into the vault so `sops`, `helm secrets`, and `kustomize` decrypt without ever holding it |
 | [Security model](security-model.md) | understand what AgentVault does and does not protect against, and how the key is protected at rest |
 | [Platform support](platforms.md) | Linux/Windows prerequisites, service managers, and known gaps |
 | [Troubleshooting](troubleshooting.md) | fix a stuck native prompt, a locked vault, a version skew, or a confusing exit code |
