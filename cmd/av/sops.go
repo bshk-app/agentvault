@@ -42,6 +42,8 @@ func runSops(args []string) {
 		runSopsShow(args[1:], sopsFieldIdentity)
 	case "rm":
 		runSopsRm(args[1:])
+	case "import":
+		runSopsImport(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "av: unknown sops command %q\n", args[0])
 		sopsUsage()
@@ -50,7 +52,7 @@ func runSops(args []string) {
 }
 
 func sopsUsage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av sops keygen NAME [--tier normal|dangerous]  (generate a SOPS identity inside the vault)\n  av sops ls\n  av sops recipient NAME  (the age1… to encrypt to — put it in .sops.yaml)\n  av sops identity NAME   (the AGE-PLUGIN-AV-1… pointer — put it in keys.txt)\n  av sops rm NAME [--force]")
+	fmt.Fprintln(os.Stderr, "usage:\n  av sops keygen NAME [--tier normal|dangerous]  (generate a SOPS identity inside the vault)\n  av sops import [--from PATH] [--name NAME]     (move existing age keys out of keys.txt into the vault)\n  av sops ls\n  av sops recipient NAME  (the age1… to encrypt to — put it in .sops.yaml)\n  av sops identity NAME   (the AGE-PLUGIN-AV-1… pointer — put it in keys.txt)\n  av sops rm NAME [--force]")
 }
 
 // sopsKeygenOptions are the parsed args of `av sops keygen`.
