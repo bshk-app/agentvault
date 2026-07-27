@@ -61,7 +61,10 @@ step "1. Building av + avd with cgo enabled (real Touch ID backend)"
 mkdir -p "$INSTALL_DIR" "$LOG_DIR"
 CGO_ENABLED=1 go build -o "$INSTALL_DIR/avd" ./cmd/avd
 CGO_ENABLED=1 go build -o "$INSTALL_DIR/av"  ./cmd/av
-echo "    installed: $INSTALL_DIR/avd  $INSTALL_DIR/av"
+# Not used by this harness (it never runs sops), but $INSTALL_DIR goes on PATH below and
+# age finds plugins by filename there — ship it so the directory is a complete install.
+CGO_ENABLED=1 go build -o "$INSTALL_DIR/age-plugin-av" ./cmd/age-plugin-av
+echo "    installed: $INSTALL_DIR/avd  $INSTALL_DIR/av  $INSTALL_DIR/age-plugin-av"
 warn "    Make sure $INSTALL_DIR is on your PATH for the 'av' commands below."
 
 # --- 2. install + load the per-user LaunchAgent (GUI session) ----------------

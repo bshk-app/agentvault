@@ -654,6 +654,13 @@ Be accurate about scope in `docs/security-model.md`. This protects the key from 
 
 *Mixed and multi-key `keys.txt` works.* Several AgentVault pointers, or AgentVault pointers sitting alongside plain `AGE-SECRET-KEY-1…` lines, all decrypt — the ordinary personal-key-plus-team-key setup `av sops import` produces. Each identity that cannot open a given file steps aside and age tries the next, which is what an all-plain `keys.txt` already does. This is worth saying because it did not work before `ipc.CodeNoMatch` (design decision 7): every AgentVault refusal was a hard error, so the *first* pointer decided the outcome for every file and files encrypted to the second key were unreadable.
 
+**Verify before writing the install instructions:** `README.md` tells users
+`brew install beshkenadze/tap/agentvault`, while `docs/getting-started.md`,
+`docs/signing-and-notarization.md`, `docs/gitea-cicd.md` and both CI workflows all name
+`bshk-app/homebrew-tap` — the tap that actually holds the Formula. The README may be an
+intentional alias; confirm with the owner rather than assuming, and leave it alone until
+then.
+
 *One diagnostic was traded away for it — document the recovery.* A **stale pointer** (the key was removed from the vault but its line stayed in `keys.txt`) is now indistinguishable from an ordinary "not my file", so it falls through silently instead of naming itself. Beside a working pointer that is invisible and correct. As the *only* pointer, the user sees age's generic `no identity matched any of the recipients` rather than the daemon's `no stored SOPS identity for recipient age1…`. Troubleshooting must therefore list this failure and point at **`av sops ls`** — which prints the names and recipients actually held — as the way to tell "my `keys.txt` is stale" from "this file genuinely isn't mine". The plugin `msg` command cannot recover it (see decision 7 for why), so the docs are the whole mitigation.
 
 ```bash
@@ -672,17 +679,20 @@ The `av://sops/<file>#<dotted.key>` reader backend. It shells out to `sops -d`, 
 
 **The Homebrew Formula must install `age-plugin-av`, and the Formula is not here.**
 
-`brew install beshkenadze/tap/agentvault` — the most-used install path, and the one the
-README leads with — resolves to a Formula in the external tap `beshkenadze/homebrew-tap`.
-This repository contains no `.rb` file, so nothing in this branch can fix it. Task 10
-updated everything that *is* here: the `Makefile`, `scripts/release-signed.sh`, and the
-Cask metadata. Both CI workflows delegate to the release script and name no binary, so
-they need nothing.
+`brew install` — the most-used install path — resolves to a Formula in the external tap
+**`bshk-app/homebrew-tap`** (confirmed with the repository owner). This repository
+contains no `.rb` file, so nothing in this branch can fix it. Task 10 updated everything
+that *is* here: the `Makefile`, `scripts/release-signed.sh`, and the Cask metadata. Both
+CI workflows delegate to the release script and name no binary, so they need nothing.
 
 Until that tap's `bin.install` names the plugin, a Formula install produces a working
-`av`, a working `avd`, and no plugin — and the failure is `no identity matched` from
-sops, which points at nothing. Shipping without it means shipping the silent break this
-whole feature exists to avoid.
+`av`, a working `avd`, and no plugin. The failure is *not* silent — age reports
+`"av" plugin not found: exec: "age-plugin-av": executable file not found in $PATH`, and
+that detail survives through sops — but it arrives line-wrapped inside the error box
+beneath a generic "Recovery failed because no master key could be found" summary, so it
+is easy to miss and easy to read as a key problem. (`no identity matched` is a different
+failure: a *recipient* mismatch, where the plugin ran and rejected every stanza.)
+Shipping without the plugin means shipping an install that looks broken in the keys.
 
 ## Open risks
 

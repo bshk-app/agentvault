@@ -77,7 +77,7 @@ av --version
    proven pattern on this runner infra).
 2. **Ensure zamokctl** — install on demand if absent.
 3. **Provisioning profile + notary creds** — decode account-specific material from secrets.
-4. **`release-signed.sh`** — CGO build of `av` + `avd`, wrap `avd` in `AgentVault.app` with
+4. **`release-signed.sh`** — CGO build of `av`, `avd`, and `age-plugin-av`, wrap `avd` in `AgentVault.app` with
    the embedded profile, Developer-ID sign (hardened runtime + timestamp), notarize, staple,
    tarball, and emit `dist/manifest.json`.
 5. **`zamokctl cask`** — render `Casks/agentvault.rb` from `manifest.json` +

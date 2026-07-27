@@ -3,8 +3,10 @@
 //
 // age discovers plugins by FILENAME, so this binary must be installed as age-plugin-av.
 // The name is derived from sopsplugin.PluginName rather than spelled again here, because a
-// rename reaching only one of the two surfaces as "no identity matched" — an error about
-// keys, not about a missing file — and sends the user looking in the wrong place.
+// rename reaching only one of the two leaves age hunting for a plugin that is not there.
+// age says so precisely — `"av" plugin not found: exec: "age-plugin-av": executable file
+// not found in $PATH` — but through sops that line is wrapped inside the error box beneath
+// a generic "no master key" summary, easy to scroll past on the way to blaming the keys.
 //
 // It holds no key and performs no cryptography. It forwards the file's header stanzas to
 // avd, which unwraps them inside its mlock'd, presence-gated session and returns only the

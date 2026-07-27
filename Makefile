@@ -8,8 +8,10 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 # `go build -o <path>` writes exactly <path> — the toolchain does NOT append .exe when
 # -o names a file. That is load-bearing for the plugin: age locates it with
 # exec.LookPath, which on Windows only accepts a PATHEXT extension, so an extensionless
-# age-plugin-av is invisible to age (and surfaces as "no identity matched", not as a
-# missing file). GOEXE is empty off Windows, so this is a no-op on macOS/Linux.
+# age-plugin-av is invisible to age. age does name the missing binary ("av" plugin not
+# found: exec: "age-plugin-av": …), but run through sops that line sits wrapped inside the
+# error box under a generic "no master key" summary, so it is easy to miss and easy to
+# misread as a key problem. GOEXE is empty off Windows: a no-op on macOS/Linux.
 EXE := $(shell go env GOEXE)
 
 test:

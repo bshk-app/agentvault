@@ -13,8 +13,9 @@ import (
 // PluginName is the age plugin name, and the single source for every place that has to
 // agree on it: age discovers the binary as "age-plugin-av", encodes identities as
 // "AGE-PLUGIN-AV-1…", and reports that same name back when parsing one. Change it here
-// or the three drift apart silently — a renamed binary just stops being found, and the
-// user sees "no identity matched" instead of a missing file.
+// or the three drift apart — a renamed binary just stops being found. age does name it
+// ("av" plugin not found: exec: "age-plugin-av": …), but through sops that line is buried
+// in the error box under a generic "no master key" summary and is easily missed.
 const PluginName = "av"
 
 // EncodeIdentity renders the pointer a user puts in keys.txt. It carries the RECIPIENT

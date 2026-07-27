@@ -495,9 +495,11 @@ func formatSopsCreated(verb string, info ipc.SopsIdentityInfo, keysPath string) 
 }
 
 // warnOldSops warns when the installed sops predates 3.10, where age plugin support landed.
-// An older sops does not run age-plugin-av at all: it reads the AGE-PLUGIN-AV-1… pointer,
-// fails to make sense of it, and reports a decryption failure that says nothing about the
-// version. A clear warning now beats that error later.
+// Below that floor sops never invokes age-plugin-av at all: it reads the AGE-PLUGIN-AV-1…
+// pointer, fails to make sense of it, and reports a decryption failure that says nothing
+// about the version. That is the reverse of a *missing* plugin on sops 3.10+, where age
+// runs, fails, and names the binary it could not start. Here nothing names anything, so a
+// clear warning now beats that error later.
 //
 // No sops on PATH is NOT an error and NOT a warning worth alarm: plenty of setups install it
 // per-project or in CI only. It is stated once and the command continues. So is a version

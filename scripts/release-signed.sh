@@ -53,8 +53,10 @@ echo "==> building $VERSION (unsigned; zamokctl signs)"
 CGO_ENABLED=1 go build -ldflags "-X main.version=$VERSION" -o "$DIST/av"                "$ROOT/cmd/av"
 CGO_ENABLED=1 go build -ldflags "-X main.version=$VERSION" -o "$APP/Contents/MacOS/avd" "$ROOT/cmd/avd"
 # age discovers plugins by filename on PATH, so age-plugin-av MUST land beside `av` in the
-# same tarball — an install that omits it fails as sops "no identity matched", with nothing
-# naming the missing binary. (Cask: packaging/agentvault-cask.json "binary".)
+# same tarball. An install that omits it does report it — age's `"av" plugin not found:
+# exec: "age-plugin-av": executable file not found in $PATH` survives through sops — but
+# wrapped inside the error box under a generic "no master key" summary, so it reads as a
+# broken key rather than a broken install. (Cask: packaging/agentvault-cask.json "binary".)
 CGO_ENABLED=1 go build -ldflags "-X main.version=$VERSION" -o "$DIST/age-plugin-av"      "$ROOT/cmd/age-plugin-av"
 
 # ---- assemble the avd bundle (Info.plist + entitlements file) ---------------------------
