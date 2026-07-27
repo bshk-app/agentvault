@@ -208,8 +208,12 @@ func importSopsKeys(c sopsPutter, src sopsImportSource, names []string, keys [][
 // error string can (sopsNothingFoundMessage).
 func sopsSourceFile(from string, candidates []string) (string, error) {
 	if from != "" {
-		if _, err := os.Stat(from); err != nil {
+		fi, err := os.Stat(from)
+		if err != nil {
 			return "", fmt.Errorf("--from %q: %v", from, err)
+		}
+		if fi.IsDir() {
+			return "", fmt.Errorf("--from %q is a directory (name the keys.txt inside it)", from)
 		}
 		return from, nil
 	}

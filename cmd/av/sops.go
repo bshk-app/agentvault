@@ -217,17 +217,14 @@ func runSopsRm(args []string) {
 	c := dialClient()
 	id, known := ipc.SopsIdentityInfo{}, false
 	ids, listErr := c.SopsList()
-	switch {
-	case listErr != nil:
+	if listErr != nil {
 		fmt.Fprintln(os.Stderr, "av: note: could not list the stored identities, so this cannot show what it is deleting:", listErr)
-	default:
+	} else if id, known = findSopsIdentity(ids, o.name); !known {
 		// A successful listing is COMPLETE (List refuses to skip an entry it cannot
 		// decode), so a name missing from it is genuinely absent — worth reporting before
 		// asking anyone to confirm the deletion of nothing.
-		if id, known = findSopsIdentity(ids, o.name); !known {
-			fmt.Fprintln(os.Stderr, "av:", sopsNoSuchIdentity("rm", o.name))
-			os.Exit(exitBadRequest)
-		}
+		fmt.Fprintln(os.Stderr, "av:", sopsNoSuchIdentity("rm", o.name))
+		os.Exit(exitBadRequest)
 	}
 	if err := confirmSopsRemove(sopsRemoveTarget(o.name, id, known), stdinIsTTY(), o.force, os.Stdin, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "av:", err)
