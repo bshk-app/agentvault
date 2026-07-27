@@ -88,7 +88,7 @@ func (s *Server) sopsUnwrap(req ipc.Request) ipc.Response {
 	if rejection != nil {
 		return *rejection
 	}
-	if rejection := s.sopsEnsureUnlocked(req.ID, p.NoPrompt); rejection != nil {
+	if rejection := s.sopsEnsureUnlocked(req.ID, "unwrap", p.NoPrompt); rejection != nil {
 		return *rejection
 	}
 	id, err := store.FindByRecipient(r)
@@ -179,7 +179,7 @@ func (s *Server) sopsFindError(reqID uint64, r *age.X25519Recipient, err error) 
 	case errors.Is(err, ErrLocked):
 		// The session's TTL can expire between the unlock gate and this read. Same
 		// situation as the gate, so the same actionable text.
-		return errResp(reqID, ipc.CodeLocked, sopsLockedMsg)
+		return errResp(reqID, ipc.CodeLocked, sopsLockedMsg("unwrap"))
 	default:
 		// An entry in the namespace that will not decode, or a vault that will not
 		// decrypt. SECURITY: the store's errors name the ENTRY only — store.go's decode
@@ -200,20 +200,37 @@ func (s *Server) sopsFindError(reqID uint64, r *age.X25519Recipient, err error) 
 // than by widening ErrLocked, which other paths and their tests depend on.
 //
 // "ask a human" is deliberate: the caller that sees this set no_prompt, which means it is
-// an agent, and an agent cannot answer a Touch ID. It must also stay DIFFERENT from
-// sopsTierGate's message — that pairing is what stops one substituted string from
+// an agent, and an agent cannot answer a Touch ID. That holds for the management RPCs too
+// — nothing but an agent reaches this text with no_prompt set. It must also stay DIFFERENT
+// from sopsTierGate's message — that pairing is what stops one substituted string from
 // satisfying two situations that need opposite responses.
-const sopsLockedMsg = `sops unwrap: vault locked — ask a human to run "av unlock"`
+//
+// op names the operation that was refused and is a PARAMETER rather than the word "unwrap"
+// baked in, because `av sops keygen` against a locked vault reporting "sops unwrap: vault
+// locked" names something that never happened. A per-operation subject was chosen over one
+// generic subject ("sops:") so a log line still says which call was refused; the advice
+// after the colon is identical because it is identical — every one of them is fixed by
+// `av unlock`.
+//
+// The word is the SUBCOMMAND's, not the RPC method's: "unwrap", "keygen", "import", "ls",
+// "rm" — so sops_put says "import" and sops_list says "ls". Every message on this path can
+// end up in front of the person who typed the command, and naming the RPC would have them
+// searching their terminal history for an `av sops put` they never ran. Audit Kinds go the
+// other way (sops_put) because their reader is a machine grepping for one RPC.
+func sopsLockedMsg(op string) string {
+	return fmt.Sprintf(`sops %s: vault locked — ask a human to run "av unlock"`, op)
+}
 
 // sopsEnsureUnlocked is ensureUnlockedResp with the SOPS path's own locked-vault wording.
 // It defers to the shared gate for the decision and the CodeDenied case (a refused Touch
-// ID is the same event on every RPC) and rewrites only the CodeLocked message.
-func (s *Server) sopsEnsureUnlocked(reqID uint64, noPrompt bool) *ipc.Response {
+// ID is the same event on every RPC) and rewrites only the CodeLocked message, naming op
+// (see sopsLockedMsg).
+func (s *Server) sopsEnsureUnlocked(reqID uint64, op string, noPrompt bool) *ipc.Response {
 	rejection := s.ensureUnlockedResp(reqID, noPrompt)
 	if rejection == nil || rejection.Error == nil || rejection.Error.Code != ipc.CodeLocked {
 		return rejection
 	}
-	r := errResp(reqID, ipc.CodeLocked, sopsLockedMsg)
+	r := errResp(reqID, ipc.CodeLocked, sopsLockedMsg(op))
 	return &r
 }
 

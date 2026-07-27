@@ -108,15 +108,13 @@ func NewStore(b backend.Backend, w backend.Writer) *Store {
 	return &Store{reader: b, writer: w}
 }
 
-// Put stores key under name. It takes a parsed *age.X25519Identity, not the key's text, so
-// an unparseable key cannot reach the vault and no caller has to handle a bare private-key
-// string to use this package.
-//
-// The tier is validated HERE and nowhere else. The write is the last moment a typo is cheap
-// to fix — `av sops keygen NAME --tier normla` must fail at the prompt rather than store an
-// identity whose tier silently reads back as normal months later. Reads are tolerant by
-// design; see decode.
-func (s *Store) Put(name string, key *age.X25519Identity, tier Tier) error {
+// ValidateName reports whether name may be stored as a SOPS identity. It is exported
+// because the rule has two enforcers and must have ONE definition: Put refuses a bad name
+// at the vault (so nothing reaches the store by any route), and the daemon's management
+// RPCs call it on the way in — BEFORE they open the session — so a typo is refused for
+// free instead of costing a Touch ID, and so an agent on a locked vault is told its name
+// is wrong rather than being sent to `av unlock` to retry the same broken request forever.
+func ValidateName(name string) error {
 	if name == "" {
 		return fmt.Errorf("sops identity: name must not be empty")
 	}
@@ -128,13 +126,48 @@ func (s *Store) Put(name string, key *age.X25519Identity, tier Tier) error {
 		// identity everywhere it is printed or typed.
 		return fmt.Errorf("sops identity %q: name must not contain a slash", name)
 	}
+	return nil
+}
+
+// NormalizeTier maps a caller's tier onto the two this package knows, defaulting the empty
+// one to normal, and rejects anything else. It is the WRITE-side rule and is deliberately
+// strict where decode is tolerant: the write is the last moment a typo is cheap to fix —
+// `av sops keygen NAME --tier normla` must fail at the prompt rather than store an identity
+// whose tier silently reads back as normal months later.
+//
+// Exported for the same reason as ValidateName: the daemon checks it before spending a
+// presence check on a request that was always going to be refused, and Put still enforces
+// it, so the two cannot drift apart into two definitions of a valid tier.
+//
+// SECURITY: the error names the offending tier only. Callers hold key material in the same
+// frame and must never wrap it into this.
+func NormalizeTier(tier Tier) (Tier, error) {
 	switch tier {
 	case "":
-		tier = TierNormal
+		return TierNormal, nil
 	case TierNormal, TierDangerous:
+		return tier, nil
 	default:
-		// Names the offending tier only. key is in scope and must not appear.
-		return fmt.Errorf("sops identity %q: invalid tier %q (want %s|%s)", name, tier, TierNormal, TierDangerous)
+		return "", fmt.Errorf("invalid tier %q (want %s|%s)", tier, TierNormal, TierDangerous)
+	}
+}
+
+// Put stores key under name. It takes a parsed *age.X25519Identity, not the key's text, so
+// an unparseable key cannot reach the vault and no caller has to handle a bare private-key
+// string to use this package.
+//
+// Name and tier are validated HERE as well as at the RPC edge, and that duplication is the
+// point: this is the only door to the vault, so a caller that skips the edge check — a
+// test, a future command — still cannot store a nameless identity or an unknown tier.
+func (s *Store) Put(name string, key *age.X25519Identity, tier Tier) error {
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+	tier, err := NormalizeTier(tier)
+	if err != nil {
+		// SECURITY: %w carries NormalizeTier's text, which names the tier only. key is in
+		// scope and must not appear.
+		return fmt.Errorf("sops identity %q: %w", name, err)
 	}
 	// SECURITY: key.String() is the private key. It goes into the envelope and straight
 	// into the vault; it is never logged and never reaches an error from here on.

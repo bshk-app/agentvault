@@ -255,18 +255,24 @@ func sopsResult(t *testing.T, resp ipc.Response) ipc.SopsUnwrapResult {
 // encoding nobody has thought of yet: a Detail built from anything but these literals is
 // not one of them, whatever it is made of.
 var sopsAuditDetails = []string{
-	"ok",                    // sops_unwrap: the file key was returned
+	"ok",                    // sops_unwrap: the file key was returned; sops_keygen/put/rm: the mutation happened
 	"no matching stanza",    // sops_unwrap: the identity is ours, the file is not
 	"malformed stanza",      // sops_unwrap: the header is not a header
 	"no presence available", // sops_unwrap: dangerous tier, and the caller set NoPrompt
 	"sops unwrap",           // denied: a dangerous-tier presence check the user cancelled
 }
 
+// sopsAuditKinds is every Kind the SOPS surface writes. The list is what makes the
+// allowlist above cover the MANAGEMENT RPCs too: an entry whose Kind is not checked is an
+// entry whose Detail is not checked, so a new RPC that logs under a Kind nobody added here
+// would be exempt from the one assertion standing between the audit log and key material.
+var sopsAuditKinds = []string{"sops_unwrap", "sops_keygen", "sops_put", "sops_rm", "denied"}
+
 // assertAuditDetails holds every sops event the fixture logged against that set.
 func assertAuditDetails(t *testing.T, log *bufLogger) {
 	t.Helper()
 	for _, e := range log.all() {
-		if e.Kind != "sops_unwrap" && e.Kind != "denied" {
+		if !slices.Contains(sopsAuditKinds, e.Kind) {
 			continue
 		}
 		if slices.Contains(sopsAuditDetails, e.Detail) {

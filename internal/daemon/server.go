@@ -586,6 +586,20 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		// SOPS private key never leaves this process. The body lives in sops_rpc.go, next
 		// to the namespace guard whose backend id it shares.
 		return s.sopsUnwrap(req)
+	// The four below are the management surface behind `av sops keygen | import | ls | rm`
+	// (sops_manage.go). They are RPCs rather than av-side code for the same reason `av setup`
+	// is one: they generate, parse and encode age keys, and av must link neither age nor
+	// sopsplugin (TestAvStaysThin). They are also the ONLY writers permitted into the sops/
+	// namespace — `av add`/`av rm` are refused there — and each writes through
+	// sopsplugin.Store, which owns the envelope format.
+	case "sops_keygen":
+		return s.sopsKeygen(req)
+	case "sops_put":
+		return s.sopsPut(req)
+	case "sops_list":
+		return s.sopsList(req)
+	case "sops_rm":
+		return s.sopsRm(req)
 	case "setup":
 		var p ipc.SetupParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {
