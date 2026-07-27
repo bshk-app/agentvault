@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"strings"
 	"testing"
 
@@ -243,10 +244,34 @@ func TestParseSopsNameArg(t *testing.T) {
 	if err != nil || name != "work" {
 		t.Fatalf("got %q, %v", name, err)
 	}
-	for _, args := range [][]string{nil, {"a", "b"}, {"--tier", "normal", "a"}} {
+	for _, args := range [][]string{nil, {"a", "b"}, {"--tier", "normal", "a"}, {"-x"}, {"--"}} {
 		if _, err := parseSopsNameArg("av sops recipient", args); err == nil {
 			t.Fatalf("parseSopsNameArg(%q) accepted bad args", args)
 		}
+	}
+}
+
+// TestParseSopsNameArgEscapesADashName is the read half of the escape parseSopsRmArgs
+// carries for the delete half. `av sops import --name -x` stores a dash-named identity
+// (--name takes whatever value it is given), so one has to be reachable — and reachable
+// means READABLE, not merely deletable: `av sops identity` is what prints the
+// AGE-PLUGIN-AV-1… pointer, and without the pointer the key cannot go in keys.txt and is
+// therefore unusable.
+func TestParseSopsNameArgEscapesADashName(t *testing.T) {
+	for _, cmd := range []string{"av sops recipient", "av sops identity"} {
+		name, err := parseSopsNameArg(cmd, []string{"--", "-x"})
+		if err != nil || name != "-x" {
+			t.Fatalf("%s -- -x = %q, %v; want %q", cmd, name, err, "-x")
+		}
+	}
+	// Without the escape the dash is still a typo, and the message has to name the way out
+	// — a user who cannot see `--` here has no reason to guess it.
+	_, err := parseSopsNameArg("av sops identity", []string{"-x"})
+	if err == nil {
+		t.Fatal("a bare -x must be refused as a flag")
+	}
+	if !strings.Contains(err.Error(), "av sops identity -- NAME") {
+		t.Fatalf("error should point at the escape, got: %v", err)
 	}
 }
 
@@ -559,6 +584,127 @@ func funcCallsFunc(t *testing.T, file, fn, want string) bool {
 	}
 	t.Fatalf("%s has no func %s — this test is guarding a call site that no longer exists", file, fn)
 	return false
+}
+
+// captureStderr runs fn with os.Stderr redirected to a pipe and returns what it wrote. The
+// error renderers print with fmt.Fprintln(os.Stderr, …), so asserting on the STREAM is what
+// makes the tests below about the line a user reads rather than about some string on the way
+// to it — and the way to it is exactly where the two locked messages were being lost.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = saved }()
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	if _, err := b.ReadFrom(r); err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+	return b.String()
+}
+
+// TestSopsExitForErrorRelaysBothLockedMessages is av's half of the assertion
+// cmd/age-plugin-av/main_test.go makes for the plugin, and the gap it fills is why the
+// collapse survived every per-task review: the daemon writes two DIFFERENT CodeLocked texts,
+// internal/client carries both through intact (internal/client/sops_test.go pins that), and
+// then the renderer here replaced them with one fixed string on the last hop to the
+// terminal. Nothing tested that hop. A user whose vault was OPEN was told to unlock it —
+// runs `av unlock`, nothing changes, the agent retries, the identical error comes back.
+//
+// The two strings are PASTED from internal/daemon/sops_rpc.go rather than shared with it: av
+// must not link the daemon (TestAvStaysThin), and a shared constant would make the two ends
+// agree by construction, which is the one thing a test of a relay must not assume.
+func TestSopsExitForErrorRelaysBothLockedMessages(t *testing.T) {
+	const (
+		// sopsLockedMsg("rm") — a genuinely locked vault, where `av unlock` is the fix.
+		lockedVault = `sops rm: vault locked — ask a human to run "av unlock"`
+		// sopsTierGate under no_prompt — the session is OPEN and only the fresh per-call
+		// presence check is missing, so `av unlock` changes nothing.
+		dangerousTier = `sops rm "prod": dangerous-tier identity needs a fresh presence check, and this caller set no_prompt`
+	)
+	for _, want := range []string{lockedVault, dangerousTier} {
+		var code int
+		out := captureStderr(t, func() {
+			code = sopsExitForError(&ipc.RPCError{Code: ipc.CodeLocked, Message: want})
+		})
+		// EQUALITY, not Contains. The bug was one string standing in for two, and a
+		// keyword assertion ("locked", "presence") is satisfiable by a substitute — which
+		// is how a message test can pass over the very defect it was written for.
+		if got := strings.TrimRight(out, "\n"); got != "av: "+want {
+			t.Errorf("av printed %q, want %q", got, "av: "+want)
+		}
+		if code != exitLocked {
+			t.Errorf("exit code for %q = %d, want exitLocked (%d)", want, code, exitLocked)
+		}
+	}
+}
+
+// TestSopsExitForErrorFallsBackAndLeavesOtherPathsAlone pins the two edges of the override:
+// what it does with nothing to relay, and what it does NOT do to the rest of av.
+func TestSopsExitForErrorFallsBackAndLeavesOtherPathsAlone(t *testing.T) {
+	const fixed = "av: vault locked — ask a human to unlock"
+	// A CodeLocked carrying no message — an older daemon, or a path that sends the bare
+	// code — must still print something actionable rather than "av: ".
+	var code int
+	out := captureStderr(t, func() { code = sopsExitForError(&ipc.RPCError{Code: ipc.CodeLocked}) })
+	if got := strings.TrimRight(out, "\n"); got != fixed {
+		t.Errorf("an empty message printed %q, want the fixed fallback %q", got, fixed)
+	}
+	if code != exitLocked {
+		t.Errorf("fallback exit code = %d, want exitLocked (%d)", code, exitLocked)
+	}
+	// And the override stops at `av sops`. Everywhere else the daemon's CodeLocked message
+	// is ErrLocked's own text, which is accurate and advice-free; relaying it there would
+	// LOSE the actionable string rather than gain one.
+	out = captureStderr(t, func() {
+		code = exitForError(&ipc.RPCError{Code: ipc.CodeLocked, Message: "vault locked: authorization not available"})
+	})
+	if got := strings.TrimRight(out, "\n"); got != fixed {
+		t.Errorf("exitForError printed %q, want the fixed string %q — other RPCs must be unchanged", got, fixed)
+	}
+	if code != exitLocked {
+		t.Errorf("exitForError exit code = %d, want exitLocked (%d)", code, exitLocked)
+	}
+}
+
+// TestSopsCommandsRenderErrorsThroughSopsExitForError keeps the fix from being undone one
+// command at a time. The messages above only prove the renderer relays; this proves every
+// `av sops` failure path REACHES it. A new subcommand wired to exitForError reintroduces the
+// collapse on its own path, and no message test would notice, because a message test only
+// covers the paths it happens to call.
+func TestSopsCommandsRenderErrorsThroughSopsExitForError(t *testing.T) {
+	for _, file := range []string{"sops.go", "sops_import.go"} {
+		parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range parsed.Decls {
+			decl, ok := d.(*ast.FuncDecl)
+			// sopsExitForError is the one legitimate caller: it delegates everything but
+			// CodeLocked to the shared mapping rather than restating it.
+			if !ok || decl.Body == nil || decl.Name.Name == "sopsExitForError" {
+				continue
+			}
+			ast.Inspect(decl.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "exitForError" {
+					t.Errorf("%s: %s calls exitForError — an `av sops` path must use sopsExitForError, or the daemon's two CodeLocked messages collapse into one on this command", file, decl.Name.Name)
+				}
+				return true
+			})
+		}
+	}
 }
 
 // TestConfirmSopsReplaceRefusesWithoutTTY: with no terminal there is nobody to warn, so a

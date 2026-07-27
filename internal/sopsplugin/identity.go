@@ -32,17 +32,32 @@ func EncodeIdentity(r *age.X25519Recipient) string {
 	return plugin.EncodeIdentity(PluginName, []byte(r.String()))
 }
 
-// DecodeIdentity parses a pointer back into the recipient it names. It rejects
-// identities belonging to other plugins so a misconfigured keys.txt fails clearly here
-// instead of reaching the daemon, where a foreign plugin's payload would fail as some
-// deeper and far less obvious error. It also names the two things users paste into the
-// identity slot by mistake — a recipient and a private key — because age reports both
-// as the same opaque parse failure.
+// DecodeIdentity parses a pointer back into the recipient it names — the inverse of
+// EncodeIdentity, and that is what it is FOR: it is how a test reads back what the daemon
+// put in SopsIdentityInfo.Identity and checks it names the recipient it claims to
+// (internal/daemon/sops_manage_test.go, store_test.go, identity_test.go).
+//
+// NO PRODUCTION PATH CALLS IT, and that is a property of age's plugin protocol rather than
+// an omission here. age parses the AGE-PLUGIN-AV-1… line in keys.txt on the CLIENT side and
+// execs age-plugin-av only once it has matched the plugin name, so this binary never sees a
+// foreign identity, a stray age1… recipient or a pasted AGE-SECRET-KEY-… — those route to
+// another plugin, or to age's own parsers, and never here. What it does see is the decoded
+// payload, which is why cmd/age-plugin-av's newIdentity takes []byte and forwards it
+// untouched. Even the framework's string-shaped entry point (plugin.HandleIdentityEncoding)
+// hands over EncodeIdentity(p.name, data) — the pointer REBUILT from that payload under
+// this plugin's own name, never the user's literal line. Routing that through the checks
+// below would re-verify a string this package had just written.
+//
+// So the diagnostics below cannot reach a user today, and calling this from newIdentity
+// would not change that — it would only add a second source of truth for "what is a
+// recipient", free to drift from the one Store.FindByRecipient matches against. They are
+// kept because they are the inverse's honest error paths and they are pinned by tests; if a
+// caller ever does parse keys.txt lines itself, this is the function to reach for.
 func DecodeIdentity(s string) (*age.X25519Recipient, error) {
-	// Two kinds of key material land in the identity slot often enough to name.
-	// Both die inside plugin.ParseIdentity as "not a plugin identity: <nil>" — age
-	// formats an already-nil error there (plugin/encode.go:35) — which tells a user
-	// neither what they pasted nor what belongs instead. The prefix alone separates
+	// Two kinds of key material land in the identity slot of a hand-edited keys.txt often
+	// enough to name. Both die inside plugin.ParseIdentity as "not a plugin identity:
+	// <nil>" — age formats an already-nil error there (plugin/encode.go:35) — which tells a
+	// reader neither what was pasted nor what belongs instead. The prefix alone separates
 	// them, and a prefix is a public format marker: these branches read no further
 	// into s, so nothing key-shaped can reach the message.
 	switch {

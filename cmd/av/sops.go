@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -53,6 +54,41 @@ func runSops(args []string) {
 
 func sopsUsage() {
 	fmt.Fprintln(os.Stderr, "usage:\n  av sops keygen NAME [--tier normal|dangerous]  (generate a SOPS identity inside the vault)\n  av sops import [--from PATH] [--name NAME]     (move existing age keys out of keys.txt into the vault)\n  av sops ls\n  av sops recipient NAME  (the age1… to encrypt to — put it in .sops.yaml)\n  av sops identity NAME   (the AGE-PLUGIN-AV-1… pointer — put it in keys.txt)\n  av sops rm NAME [--force]")
+}
+
+// sopsExitForError is exitForError for the `av sops` commands, and it diverges in exactly
+// one answer: on CodeLocked it prints the DAEMON's message instead of av's fixed string.
+//
+// Two situations arrive here as CodeLocked and they need OPPOSITE responses:
+//
+//   - a genuinely locked vault, where `av unlock` is the fix (sopsLockedMsg);
+//   - a dangerous-tier identity whose fresh presence check was skipped because the caller
+//     set AV_NO_PROMPT, where the session is already OPEN and only the per-call check is
+//     missing (sopsTierGate). Both live in internal/daemon/sops_rpc.go.
+//
+// exitForError's "vault locked — ask a human to unlock" is right for the first and a LOOP
+// for the second: a human runs `av unlock` on an already-unlocked vault, nothing changes,
+// the agent retries, the identical error comes back. The daemon writes two different texts
+// precisely so that cannot happen; discarding them here is what made it happen.
+//
+// age-plugin-av relays the same two strings for the same reason (cmd/age-plugin-av's
+// daemonError). This is that decision applied to the OTHER caller: sops_rm, and the replace
+// path of sops_keygen/sops_put, reach sopsTierGate through `av` — never through the plugin.
+//
+// The scope is `av sops` and NOT exitForError at large, deliberately. On resolve, unlock and
+// the rest, the daemon's CodeLocked message is ErrLocked's own "vault locked: authorization
+// not available" — accurate, and silent about what to do next. The fixed string is an
+// improvement there, and those paths are documented and tested to print it.
+//
+// An empty message falls through to exitForError, so a daemon that sends the bare code
+// still prints something actionable rather than "av: ".
+func sopsExitForError(err error) int {
+	var rpc *ipc.RPCError
+	if errors.As(err, &rpc) && rpc.Code == ipc.CodeLocked && rpc.Message != "" {
+		fmt.Fprintln(os.Stderr, "av:", rpc.Message)
+		return exitLocked
+	}
+	return exitForError(err)
 }
 
 // sopsKeygenOptions are the parsed args of `av sops keygen`.
@@ -129,7 +165,7 @@ func runSopsKeygen(args []string) {
 	verb := sopsWriteVerb(sopsCheckReplace(c, []string{o.name}, stdinIsTTY(), os.Stdin, os.Stderr))
 	info, err := c.SopsKeygen(o.name, o.tier)
 	if err != nil {
-		os.Exit(exitForError(err))
+		os.Exit(sopsExitForError(err))
 	}
 	fmt.Print(formatSopsCreated(verb, info, config.SopsKeysFilePath()))
 	warnSopsEnvShadow()
@@ -146,7 +182,7 @@ func runSopsLs(args []string) {
 	}
 	ids, err := dialClient().SopsList()
 	if err != nil {
-		os.Exit(exitForError(err))
+		os.Exit(sopsExitForError(err))
 	}
 	fmt.Print(formatSopsList(ids))
 }
@@ -188,13 +224,17 @@ type sopsRmOptions struct {
 // parseSopsRmArgs extracts NAME and the optional --force from
 // `av sops rm [--force] [--] NAME`.
 //
-// `--` ends the flags, and rm is the ONLY sops subcommand that takes it. That is not
-// symmetry for its own sake: `av sops import --name -x` still stores an identity whose name
-// begins with a dash (--name takes whatever value it is given, by definition), and `av rm
-// sops/-x` is refused by the reserved-namespace guard, so without an escape here such an
-// entry would be listed forever and removable by nothing. rm already carries that role for
-// the other unreachable entry — the one too corrupt for `av sops ls` to decode — so the way
-// out lives where the way out already lives.
+// `--` ends the flags. It is not symmetry for its own sake: `av sops import --name -x`
+// still stores an identity whose name begins with a dash (--name takes whatever value it is
+// given, by definition), and `av rm sops/-x` is refused by the reserved-namespace guard, so
+// without an escape here such an entry would be listed forever and removable by nothing. rm
+// already carries that role for the other unreachable entry — the one too corrupt for
+// `av sops ls` to decode — so the way out lives where the way out already lives.
+//
+// rm is not the only subcommand that takes `--`, and it must not be: a dash-named identity
+// that can only be DELETED is a key nobody can use, because `av sops identity -- -x` is
+// what prints the pointer keys.txt needs. parseSopsNameArg carries the escape for the read
+// side, and the two are what make such a name merely awkward rather than fatal.
 func parseSopsRmArgs(args []string) (sopsRmOptions, error) {
 	var o sopsRmOptions
 	have, literal := false, false
@@ -260,7 +300,7 @@ func runSopsRm(args []string) {
 		os.Exit(exitBadRequest)
 	}
 	if err := c.SopsRemove(o.name); err != nil {
-		os.Exit(exitForError(err))
+		os.Exit(sopsExitForError(err))
 	}
 	fmt.Printf("removed SOPS identity %q\n", o.name)
 }
@@ -316,7 +356,7 @@ func runSopsShow(args []string, field sopsShowField) {
 	}
 	ids, err := dialClient().SopsList()
 	if err != nil {
-		os.Exit(exitForError(err))
+		os.Exit(sopsExitForError(err))
 	}
 	id, ok := findSopsIdentity(ids, name)
 	if !ok {
@@ -353,12 +393,23 @@ func sopsNoSuchIdentity(op, name string) error {
 // parseSopsNameArg extracts the single positional NAME for the sops subcommands that take
 // nothing else. A flag-looking argument is refused rather than swallowed as a name, so a
 // mistyped flag is reported instead of creating a lookup for "--tier".
+//
+// `--` ends the flags here for the same reason it does in parseSopsRmArgs, and reading it
+// only there was a bug: `av sops import --name -x` stores a dash-named identity, and
+// without an escape on THIS path `av sops identity -x` cannot print its AGE-PLUGIN-AV-1…
+// pointer. That pointer is the only way to put the key in keys.txt, so the key itself would
+// be unusable — not merely the name awkward. Removability alone does not cover it: an
+// identity you can delete but never use is a key you have already lost.
 func parseSopsNameArg(cmd string, args []string) (string, error) {
+	literal := len(args) > 0 && args[0] == "--"
+	if literal {
+		args = args[1:]
+	}
 	if len(args) != 1 {
 		return "", fmt.Errorf("%s needs exactly one NAME (use: %s NAME)", cmd, cmd)
 	}
-	if strings.HasPrefix(args[0], "-") {
-		return "", fmt.Errorf("%s: unexpected flag %q", cmd, args[0])
+	if !literal && strings.HasPrefix(args[0], "-") {
+		return "", fmt.Errorf("%s: unexpected flag %q (for a NAME that starts with a dash, use: %s -- NAME)", cmd, args[0], cmd)
 	}
 	return args[0], nil
 }
@@ -382,7 +433,7 @@ func sopsCheckReplace(c sopsLister, names []string, stdinTTY bool, in io.Reader,
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "av: could not list the stored SOPS identities, so this cannot tell whether it would replace one — refusing rather than risk destroying a key.")
 		fmt.Fprintln(os.Stderr, "av: an entry that will not decode is removable with `av sops rm NAME`.")
-		os.Exit(exitForError(err))
+		os.Exit(sopsExitForError(err))
 	}
 	if err := confirmSopsReplace(ids, names, stdinTTY, in, out); err != nil {
 		fmt.Fprintln(os.Stderr, "av:", err)

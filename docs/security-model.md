@@ -117,9 +117,12 @@ Protected:
 - **The key is never in the memory of `sops`, `helm`, or `kustomize`.** The X25519 unwrap
   happens inside `avd`. Those processes hold one file key at a time and never the identity
   that produced it.
-- **Use is gated and audited.** Decryption needs an unlocked, presence-gated session, and
-  each unwrap that reached an identity is logged with its name, tier, and outcome — never a
-  value. A `dangerous`-tier identity costs a fresh presence check per file.
+- **Use is gated and audited.** Decryption needs an unlocked, presence-gated session on the
+  **Secure Enclave** and **keychain** tiers; under `av setup --plaintext` the vault identity
+  is unwrapped on disk, so anyone who can read that file recovers the SOPS key with no
+  running `avd` and no presence check at all. Each unwrap that reached an identity is logged
+  with its name, tier, and outcome — never a value. A `dangerous`-tier identity costs a
+  fresh presence check per file.
 - **No plaintext copy is deleted silently.** `av sops import` reports the `.bak` it kept and
   says the plaintext key is still in it.
 

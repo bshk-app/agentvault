@@ -392,6 +392,11 @@ func noPrompt() bool { return os.Getenv("AV_NO_PROMPT") != "" }
 // message to stderr. A *ipc.RPCError (from resolve) is mapped by its stable Code; a
 // *client.ErrDaemonOutdated (an agent hit a stale daemon it must not auto-restart) prints
 // its "ask a human" message; anything else is a generic failure.
+//
+// CodeLocked prints a FIXED string and discards rpc.Message on purpose: on these RPCs the
+// daemon sends ErrLocked's own "vault locked: authorization not available", which is
+// accurate and says nothing about what to do next. `av sops` is the one caller for which
+// that substitution is wrong — see sopsExitForError, which overrides this case alone.
 func exitForError(err error) int {
 	var outdated *client.ErrDaemonOutdated
 	if errors.As(err, &outdated) {

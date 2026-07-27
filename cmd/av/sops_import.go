@@ -162,7 +162,7 @@ func runSopsImport(args []string) {
 		os.Exit(exitGeneric)
 	case err != nil:
 		reportSopsImportFailure(source.path, names, stored)
-		os.Exit(exitForError(err))
+		os.Exit(sopsExitForError(err))
 	}
 	fmt.Print(formatSopsImportDone(source.path, stored, keepBackup))
 	warnSopsEnvShadow()

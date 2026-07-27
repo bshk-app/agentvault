@@ -325,8 +325,10 @@ func TestFindByRecipientMatchesAcrossParsedAndEncodedForms(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// EncodeIdentity → DecodeIdentity is what keys.txt and the plugin wire do between
-	// `av sops identity` printing the pointer and the daemon looking the key up.
+	// EncodeIdentity → DecodeIdentity round-trips the pointer `av sops identity` prints,
+	// which is the form that reaches keys.txt. It is a verification of that ENCODING, not a
+	// replay of the wire: age decodes the line on its own side and hands the plugin the
+	// payload, so DecodeIdentity is the test's inverse rather than a production hop.
 	wire, err := sopsplugin.DecodeIdentity(sopsplugin.EncodeIdentity(key.Recipient()))
 	if err != nil {
 		t.Fatal(err)

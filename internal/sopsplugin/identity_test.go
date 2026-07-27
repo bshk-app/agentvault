@@ -107,8 +107,14 @@ func TestDecodeIdentityRejectsGarbage(t *testing.T) {
 
 // TestDecodeIdentityNamesTheCommonMistakes pins the diagnostics, not just the rejection.
 // age collapses every one of these into "not a plugin identity: <nil>" — it formats an
-// already-nil error — so without these branches the user gets a message that names
-// neither what they pasted nor what belongs there instead.
+// already-nil error — so a caller that fell through to it would report neither what it was
+// handed nor what belongs there instead.
+//
+// No production path reaches these branches, and DecodeIdentity's own comment says why: age
+// parses keys.txt itself and routes a stray age1… or AGE-SECRET-KEY-… line to its own
+// parsers, never to this plugin. They are the honest error paths of EncodeIdentity's
+// inverse, and this pins them so a caller that ever does read keys.txt lines inherits a
+// usable message instead of age's nil.
 func TestDecodeIdentityNamesTheCommonMistakes(t *testing.T) {
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
