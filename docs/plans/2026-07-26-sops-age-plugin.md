@@ -699,12 +699,20 @@ Shipping without the plugin means shipping an install that looks broken in the k
 Largely closed by `.github/workflows/ci.yml`, which is where the toolchain and the
 non-macOS platforms finally execute. What each risk turned into:
 
-- **Windows plugin discovery.** *Now run.* A `windows-latest` job runs `go test ./...`,
-  which is the first execution of this suite on Windows and covers the Task 1 spike's
-  `.exe` path. Getting there required fixing `os.MkdirTemp("/tmp", …)` in five packages —
-  `/tmp` was pinned for macOS's `sun_path` limit, and it simply does not exist on Windows,
-  so those tests could never have run there. Still open: nothing *else* about Windows is
-  proven, and the smoke script does not run there at all (bash + a unix socket).
+- **Windows plugin discovery.** *Closed — and it works.* A `windows-latest` job runs
+  `go test ./...`, the first execution of this suite on Windows, and `internal/sopsplugin`
+  **passes** there, so the Task 1 spike's `.exe` path is proven rather than argued.
+  `internal/transport` (named pipes) passes too. Getting that far needed
+  `os.MkdirTemp("/tmp", …)` fixed in five packages: `/tmp` was pinned for macOS's
+  `sun_path` limit and does not exist on Windows at all.
+- **Newly open: the rest of Windows.** The same first run failed 21 pre-existing tests
+  that had never executed anywhere — Unix permission-bit assertions (13, six packages),
+  the daemon failing to start because `internal/client` builds it without `.exe` and
+  `exec.LookPath` then cannot see it (12, the same trap the Makefile documents for
+  `age-plugin-av`), and two env-injection tests. None is a regression; all were invisible
+  while `make cross-test` only compiled. The Windows job is red until they are addressed,
+  and whether to fix them or to state that Windows is compile-only is a product decision.
+  See docs/sops.md, "Windows: what does not work yet".
 - **`sops updatekeys` through the plugin.** *Closed.* `scripts/smoke-sops.sh` re-wraps a
   file, asserts the added recipient, and decrypts the result again; it runs in CI.
 - **Real `sops`, `helm secrets`, and `kustomize`+ksops.** *Closed on Linux.* The Linux job

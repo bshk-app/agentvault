@@ -345,7 +345,26 @@ refused outright, so a typo cannot silently require nothing.
 |---|---|
 | Linux | CI (`.github/workflows/ci.yml`) runs `go test ./...` and the whole of `scripts/smoke-sops.sh` on every push and pull request, against pinned real binaries — sops 3.13.1, age 1.3.1, helm 4.2.2 with helm-secrets 4.7.7, kustomize 5.8.1 and ksops 4.5.1. That covers `sops -d`, `sops updatekeys`, a two-pointer `keys.txt`, `av sops import`, the locked-vault message, `helm secrets template` and `kustomize build` + ksops. `AV_SMOKE_REQUIRE` fails the job if any of them skips. |
 | macOS | The same script, run by hand — every check passes with the toolchain above. There is no macOS CI job: Secure Enclave and Touch ID are unreachable on a hosted runner, which is where the macOS-only risk actually lives, so a job could only re-run what Linux already covers. |
-| Windows | CI runs `go test ./...` on `windows-latest`, which is what executes `internal/sopsplugin`'s discovery test against age's `exec.LookPath` — the reason the Makefile emits `age-plugin-av.exe`. `scripts/smoke-sops.sh` does **not** run there: it is bash driving a unix socket, and it refuses to start on Windows. So the plugin's *discovery* is covered and the end-to-end `sops` toolchain on Windows is not. |
+| Windows | Partly. CI runs `go test ./...` on `windows-latest`, and **`internal/sopsplugin` passes** — so plugin discovery through age's `exec.LookPath`, the reason the Makefile emits `age-plugin-av.exe`, is now proven rather than assumed. `internal/transport` (named pipes) passes too. The job as a whole is **red**: its first run surfaced 21 pre-existing failures in tests that had never executed on Windows — see [Windows: what does not work yet](#windows-what-does-not-work-yet). `scripts/smoke-sops.sh` does not run there at all: it is bash driving a unix socket and refuses to start. |
+
+### Windows: what does not work yet
+
+`make cross-test` only ever cross-compiled, so nothing in this suite had run on Windows
+until CI did it. The first run failed 21 tests, in three groups, none of them a regression:
+
+1. **Unix permission bits (13 tests, 6 packages).** Assertions like `mode = 666, want
+   0600` and `perm = 777, want 700`. Windows does not implement POSIX mode bits, so these
+   assertions cannot hold there as written — and the security property they stand for
+   needs a different expression on Windows (ACLs), not a relaxed assertion.
+2. **The daemon does not come up (12 tests).** `internal/client` fails with
+   `exec: "…\Temp\avi…\avd": executable file not found in %PATH%` — the test builds the
+   daemon without the `.exe` suffix, so `exec.LookPath` cannot see it. This is the *same*
+   trap the Makefile documents for `age-plugin-av`, in a second place.
+   `cmd/age-plugin-av`'s end-to-end test then times out waiting for the named pipe.
+3. **Two `internal/client` env tests** inject nothing into the child process.
+
+Until those are fixed, treat Windows as: the plugin is *discoverable* and the transport
+works; the daemon end-to-end path is unproven.
 
 ### For maintainers: the Formula still omits the plugin
 
