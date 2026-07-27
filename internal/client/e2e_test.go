@@ -13,6 +13,7 @@ import (
 
 	"github.com/beshkenadze/agentvault/internal/backend/agefile"
 	"github.com/beshkenadze/agentvault/internal/ipc"
+	"github.com/beshkenadze/agentvault/internal/transport"
 )
 
 // realSecret is the value the e2e proves NEVER reaches av's stdout/stderr. The
@@ -154,7 +155,7 @@ func buildAndAutostartEnv(t *testing.T, auth string) (dir, sockPath, manifestPat
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
-	avd := filepath.Join(dir, "avd")
+	avd := filepath.Join(dir, exeName("avd"))
 	build := exec.Command("go", "build", "-o", avd, "github.com/beshkenadze/agentvault/cmd/avd")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build avd: %v\n%s", err, out)
@@ -163,7 +164,6 @@ func buildAndAutostartEnv(t *testing.T, auth string) (dir, sockPath, manifestPat
 	idPath, vaultPath, manifestPath := e2eVault(t, dir)
 
 	t.Setenv("AV_AVD_PATH", avd)
-	t.Setenv("XDG_RUNTIME_DIR", dir) // socket resolves under this short dir
 	t.Setenv("AV_AGE_IDENTITY", idPath)
 	t.Setenv("AV_AGE_VAULT", vaultPath)
 	if auth != "" {
@@ -173,8 +173,11 @@ func buildAndAutostartEnv(t *testing.T, auth string) (dir, sockPath, manifestPat
 	}
 
 	sockPath = filepath.Join(dir, "agentvault", "avd.sock")
+	// One endpoint for both sides. The spawned avd inherits this env and resolves the
+	// SAME path through transport.DefaultSocketPath, on every platform.
+	t.Setenv(transport.SocketPathEnv, sockPath)
 	t.Cleanup(func() {
-		_ = exec.Command("pkill", "-f", avd).Run()
+		killDaemon(avd)
 		_ = os.Remove(sockPath)
 		_ = os.Remove(sockPath + ".lock")
 	})
@@ -200,7 +203,7 @@ func buildAndAutostartZeroConfig(t *testing.T) (sockPath, cfgDir string) {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
-	avd := filepath.Join(dir, "avd")
+	avd := filepath.Join(dir, exeName("avd"))
 	build := exec.Command("go", "build", "-o", avd, "github.com/beshkenadze/agentvault/cmd/avd")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build avd: %v\n%s", err, out)
@@ -209,7 +212,6 @@ func buildAndAutostartZeroConfig(t *testing.T) (sockPath, cfgDir string) {
 	// HOME + XDG_CONFIG_HOME steer config.DefaultConfigDir() into the temp dir; the
 	// spawned avd inherits this env (autostart uses exec.Command with no custom Env).
 	t.Setenv("AV_AVD_PATH", avd)
-	t.Setenv("XDG_RUNTIME_DIR", dir) // socket resolves under this short dir
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
 	t.Setenv("AV_TEST_AUTH", "allow")   // unlock without a biometric prompt
@@ -222,8 +224,11 @@ func buildAndAutostartZeroConfig(t *testing.T) (sockPath, cfgDir string) {
 
 	cfgDir = filepath.Join(dir, "xdg", "agentvault")
 	sockPath = filepath.Join(dir, "agentvault", "avd.sock")
+	// One endpoint for both sides. The spawned avd inherits this env and resolves the
+	// SAME path through transport.DefaultSocketPath, on every platform.
+	t.Setenv(transport.SocketPathEnv, sockPath)
 	t.Cleanup(func() {
-		_ = exec.Command("pkill", "-f", avd).Run()
+		killDaemon(avd)
 		_ = os.Remove(sockPath)
 		_ = os.Remove(sockPath + ".lock")
 	})
@@ -250,7 +255,7 @@ func buildAndAutostartKeychain(t *testing.T) (sockPath, cfgDir, keystoreDir stri
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
-	avd := filepath.Join(dir, "avd")
+	avd := filepath.Join(dir, exeName("avd"))
 	build := exec.Command("go", "build", "-o", avd, "github.com/beshkenadze/agentvault/cmd/avd")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build avd: %v\n%s", err, out)
@@ -262,7 +267,6 @@ func buildAndAutostartKeychain(t *testing.T) (sockPath, cfgDir, keystoreDir stri
 	}
 
 	t.Setenv("AV_AVD_PATH", avd)
-	t.Setenv("XDG_RUNTIME_DIR", dir) // socket resolves under this short dir
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
 	t.Setenv("AV_TEST_AUTH", "allow")         // keychain unwrapper's presence prompt + dangerous-tier
@@ -276,8 +280,11 @@ func buildAndAutostartKeychain(t *testing.T) (sockPath, cfgDir, keystoreDir stri
 
 	cfgDir = filepath.Join(dir, "xdg", "agentvault")
 	sockPath = filepath.Join(dir, "agentvault", "avd.sock")
+	// One endpoint for both sides. The spawned avd inherits this env and resolves the
+	// SAME path through transport.DefaultSocketPath, on every platform.
+	t.Setenv(transport.SocketPathEnv, sockPath)
 	t.Cleanup(func() {
-		_ = exec.Command("pkill", "-f", avd).Run()
+		killDaemon(avd)
 		_ = os.Remove(sockPath)
 		_ = os.Remove(sockPath + ".lock")
 	})

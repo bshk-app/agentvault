@@ -155,20 +155,20 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # The first execution of this suite on Windows. It runs internal/sopsplugin's
-      # discovery test, whose `.exe` path exists because age locates a plugin with
-      # exec.LookPath, and on Windows LookPath only accepts a PATHEXT extension — so an
-      # extensionless age-plugin-av is invisible there. That reasoning has been in the
-      # Makefile since the design; this is what checks it, and it PASSES.
+      # Runs internal/sopsplugin's discovery test, whose `.exe` path exists because age
+      # locates a plugin with exec.LookPath, and on Windows LookPath only accepts a
+      # PATHEXT extension — so an extensionless age-plugin-av is invisible there. That
+      # reasoning has been in the Makefile since the design; this is what checks it.
       #
-      # THIS JOB IS CURRENTLY RED, and deliberately so. Its first run failed 21
-      # pre-existing tests that `make cross-test` could never have caught because it only
-      # compiles: Unix permission-bit assertions that cannot hold on Windows, and an
-      # extensionless `avd` that exec.LookPath will not find — the very same trap, in
-      # internal/client this time. They are catalogued in docs/sops.md under "Windows:
-      # what does not work yet". Fixing them, or deciding Windows is compile-only and
-      # narrowing this job, is a product call — not something to paper over with
-      # continue-on-error, which would put the job straight back to proving nothing.
+      # Its first run failed 21 pre-existing tests that `make cross-test` could never have
+      # caught because it only compiles. All are fixed; the two assertions that CANNOT
+      # hold on NTFS (POSIX mode bits) skip with a reason naming the real cause, and are
+      # catalogued in docs/sops.md under "Windows: what is skipped".
+      #
+      # NO `-short` and NO continue-on-error, deliberately: either would put this job back
+      # to proving nothing, which is the failure mode it exists against. In particular the
+      # daemon end-to-end tests — a real avd over a real named pipe — only run because
+      # this is a full `go test`.
       #
       # No smoke script here: it is bash + a unix socket and refuses to run on Windows.
       - name: go test ./...

@@ -345,26 +345,54 @@ refused outright, so a typo cannot silently require nothing.
 |---|---|
 | Linux | CI (`.github/workflows/ci.yml`) runs `go test ./...` and the whole of `scripts/smoke-sops.sh` on every push and pull request, against pinned real binaries — sops 3.13.1, age 1.3.1, helm 4.2.2 with helm-secrets 4.7.7, kustomize 5.8.1 and ksops 4.5.1. That covers `sops -d`, `sops updatekeys`, a two-pointer `keys.txt`, `av sops import`, the locked-vault message, `helm secrets template` and `kustomize build` + ksops. `AV_SMOKE_REQUIRE` fails the job if any of them skips. |
 | macOS | The same script, run by hand — every check passes with the toolchain above. There is no macOS CI job: Secure Enclave and Touch ID are unreachable on a hosted runner, which is where the macOS-only risk actually lives, so a job could only re-run what Linux already covers. |
-| Windows | Partly. CI runs `go test ./...` on `windows-latest`, and **`internal/sopsplugin` passes** — so plugin discovery through age's `exec.LookPath`, the reason the Makefile emits `age-plugin-av.exe`, is now proven rather than assumed. `internal/transport` (named pipes) passes too. The job as a whole is **red**: its first run surfaced 21 pre-existing failures in tests that had never executed on Windows — see [Windows: what does not work yet](#windows-what-does-not-work-yet). `scripts/smoke-sops.sh` does not run there at all: it is bash driving a unix socket and refuses to start. |
+| Windows | CI runs `go test ./...` on `windows-latest` and it is **green**. Plugin discovery through age's `exec.LookPath` (the reason the Makefile emits `age-plugin-av.exe`), named-pipe transport, and the full daemon end-to-end path — `cmd/age-plugin-av`'s test drives a real `avd` over a real pipe — all pass. Two assertions remain skipped, both about POSIX mode bits; see [Windows: what is skipped](#windows-what-is-skipped). `scripts/smoke-sops.sh` still does not run there: it is bash driving a unix socket and refuses to start. |
 
-### Windows: what does not work yet
+### Pointing `av` and `avd` at one endpoint: `AV_SOCKET_PATH`
+
+`AV_SOCKET_PATH` overrides the daemon endpoint. Every process in the chain — `av`, `avd`
+and `age-plugin-av` — resolves its endpoint through the same function, so setting this one
+variable puts them all on a private endpoint together. That is what an **isolated
+instance** is: an ephemeral daemon running beside the user's real one, which is exactly
+what `scripts/smoke-sops.sh` needs.
+
+| Platform | Default endpoint | Value of the override |
+|---|---|---|
+| Linux / macOS | `$XDG_RUNTIME_DIR/agentvault/avd.sock`, else `<user-cache-dir>/agentvault/avd.sock` | The unix socket path. Still subject to the ~104-byte `sun_path` limit. |
+| Windows | `%LOCALAPPDATA%\AgentVault\avd.pipe` | The *logical* path. The named pipe is derived from it by hash, and its parent dir holds the lockfile and audit log — so two override paths are two fully independent instances, same as on Unix. |
+
+On Unix an isolated instance could always be had by pointing `$XDG_RUNTIME_DIR` at a temp
+dir. Windows has no equivalent of that variable, so before `AV_SOCKET_PATH` existed there
+was **no way to run a second instance there at all** — which is also why the daemon
+end-to-end tests could not work on Windows: they set `$XDG_RUNTIME_DIR` and dialled a path
+derived from it, while the `avd` they spawned resolved `%LOCALAPPDATA%` and listened on a
+different pipe.
+
+An empty `AV_SOCKET_PATH` is treated as unset, so an exported-but-empty variable in a shell
+profile cannot send the daemon somewhere strange.
+
+### Windows: what is skipped
 
 `make cross-test` only ever cross-compiled, so nothing in this suite had run on Windows
-until CI did it. The first run failed 21 tests, in three groups, none of them a regression:
+until CI did it. That first run failed 21 tests. None was a regression, and all are now
+fixed except two assertions that cannot be expressed on NTFS:
 
-1. **Unix permission bits (13 tests, 6 packages).** Assertions like `mode = 666, want
-   0600` and `perm = 777, want 700`. Windows does not implement POSIX mode bits, so these
-   assertions cannot hold there as written — and the security property they stand for
-   needs a different expression on Windows (ACLs), not a relaxed assertion.
-2. **The daemon does not come up (12 tests).** `internal/client` fails with
-   `exec: "…\Temp\avi…\avd": executable file not found in %PATH%` — the test builds the
-   daemon without the `.exe` suffix, so `exec.LookPath` cannot see it. This is the *same*
-   trap the Makefile documents for `age-plugin-av`, in a second place.
-   `cmd/age-plugin-av`'s end-to-end test then times out waiting for the named pipe.
-3. **Two `internal/client` env tests** inject nothing into the child process.
+1. **Permission-bit assertions** are skipped. Go can only ever report `0666`/`0444` for a
+   file and `0777` for a directory on Windows (`$GOROOT/src/os/types_windows.go`), so
+   `0600`/`0700`/`0755` are not expressible. The `requirePerm` helper each package carries
+   skips only the *mode* comparison — the file-exists half still runs, so a file that was
+   never written still fails the test on Windows. The production `chmod` calls are
+   unchanged and remain load-bearing on Unix.
+2. **`TestAddFailureLeavesOriginalIntact`** (`internal/backend/agefile`) is skipped. The
+   invariant it guards — a failed `Add` never touches the live vault — is
+   platform-neutral, but the way the test *provokes* the failure is not: `os.Chmod` on
+   Windows sets only the read-only attribute, and on a directory that attribute does not
+   deny file creation, so the temp file is still creatable and there is no failed write to
+   assert about. Denying it for real needs an NTFS DACL, which Go's `os` package cannot
+   express.
 
-Until those are fixed, treat Windows as: the plugin is *discoverable* and the transport
-works; the daemon end-to-end path is unproven.
+The security property behind (1) — owner-only files — still needs a real expression on
+Windows via ACLs. That is a genuine gap, tracked as an open risk in
+`docs/plans/2026-07-26-sops-age-plugin.md`; it is not something a test can assert today.
 
 ### For maintainers: the Formula still omits the plugin
 

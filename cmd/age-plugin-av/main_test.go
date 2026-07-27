@@ -19,6 +19,7 @@ import (
 	"github.com/beshkenadze/agentvault/internal/backend/agefile"
 	"github.com/beshkenadze/agentvault/internal/client"
 	"github.com/beshkenadze/agentvault/internal/sopsplugin"
+	"github.com/beshkenadze/agentvault/internal/transport"
 )
 
 // pluginTimeout bounds one decryption through the plugin. Exceeding it is a FAILURE, not a
@@ -37,6 +38,24 @@ func exeName(name string) string {
 		return name + ".exe"
 	}
 	return name
+}
+
+// killDaemon terminates the avd built at path — and ONLY that one. This test spawns a
+// DETACHED daemon, so leaving it running outlives the test and pins the temp dir open.
+// Matching on the full binary path (unique per test) rather than on the process name is
+// what keeps a concurrently-running package's daemon alive: `go test ./...` runs
+// internal/client at the same time, and it spawns an avd of its own.
+func killDaemon(path string) {
+	if runtime.GOOS != "windows" {
+		_ = exec.Command("pkill", "-f", path).Run()
+		return
+	}
+	// No pkill on Windows, and taskkill can only match an image NAME. CIM exposes the
+	// full ExecutablePath, which is what makes this precise instead of a blanket kill.
+	_ = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		`Get-CimInstance Win32_Process -Filter "Name='avd.exe'" | `+
+			`Where-Object { $_.ExecutablePath -eq '`+path+`' } | `+
+			`ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`).Run()
 }
 
 // buildAndSeed stands up the whole real chain: it builds the REAL avd and the REAL
@@ -124,7 +143,6 @@ func buildAndSeed(t *testing.T, ids map[string]sopsplugin.Tier) (sockPath string
 	}
 
 	t.Setenv("AV_AVD_PATH", avd)
-	t.Setenv("XDG_RUNTIME_DIR", dir) // both this process and the spawned plugin resolve the socket under it
 	t.Setenv("AV_AGE_IDENTITY", idPath)
 	t.Setenv("AV_AGE_VAULT", vaultPath)
 	t.Setenv("AV_TEST_AUTH", "allow") // stub presence: unlock without a real Touch ID
@@ -133,8 +151,14 @@ func buildAndSeed(t *testing.T, ids map[string]sopsplugin.Tier) (sockPath string
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	sockPath = filepath.Join(dir, "agentvault", "avd.sock")
+	// One endpoint for every process in the chain — this test, the spawned avd, and the
+	// plugin that sops/age execs. All three resolve it through transport.DefaultSocketPath,
+	// so a single inherited variable puts them together on any platform. $XDG_RUNTIME_DIR
+	// used to do this job, but it is a Unix convention that Windows has no equivalent of:
+	// there the daemon would resolve %LOCALAPPDATA% and listen on a pipe nobody dials.
+	t.Setenv(transport.SocketPathEnv, sockPath)
 	t.Cleanup(func() {
-		_ = exec.Command("pkill", "-f", avd).Run()
+		killDaemon(avd)
 		_ = os.Remove(sockPath)
 		_ = os.Remove(sockPath + ".lock")
 	})

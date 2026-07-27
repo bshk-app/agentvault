@@ -29,9 +29,16 @@ func TestEnvRunInjectsAndMasks(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	// The child echoes $S (masked on stdout) and writes $S+$PLAIN to a file (unmasked,
 	// proving real injection of both the resolved ref and the literal).
+	//
+	// The redirect target is embedded in a SHELL script, so it has to be a shell path,
+	// not a native one. On Windows the temp dir is C:\Users\... and sh treats every
+	// backslash as an escape, so the redirect silently lands on a mangled name in the
+	// cwd — exit 0, and the test sees an empty file instead of an error. ToSlash plus
+	// quoting keeps the one string correct on every platform; `out` itself stays native
+	// for os.ReadFile below.
 	code, err := EnvRun(cl, EnvOptions{
 		EnvFilePath: env,
-		Command:     []string{"sh", "-c", "echo $S; printf '%s' \"$S:$PLAIN\" > " + out},
+		Command:     []string{"sh", "-c", `echo $S; printf '%s' "$S:$PLAIN" > "` + filepath.ToSlash(out) + `"`},
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("EnvRun: %v", err)
@@ -101,7 +108,8 @@ func TestEnvRunYamlOnlyFallback(t *testing.T) {
 	code, err := EnvRun(cl, EnvOptions{
 		EnvFilePath:  filepath.Join(t.TempDir(), ".env"), // absent
 		ManifestPath: man,
-		Command:      []string{"sh", "-c", "printf '%s' \"$SECRET\" > " + seen},
+		// Shell path, not a native one — see TestEnvRunInjectsAndMasks for why.
+		Command:      []string{"sh", "-c", `printf '%s' "$SECRET" > "` + filepath.ToSlash(seen) + `"`},
 	}, &stdout, &stderr)
 	if err != nil || code != 0 {
 		t.Fatalf("EnvRun (yaml-only): code=%d err=%v", code, err)

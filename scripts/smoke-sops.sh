@@ -235,6 +235,7 @@ export AV_AGE_IDENTITY="$WORK/id.txt"
 export AV_AGE_VAULT="$WORK/vault.age"
 export AV_AVD_PATH="$BIN/avd"              # any autostart must reach OUR avd, never yours
 SOCK="$XDG_RUNTIME_DIR/agentvault/avd.sock"
+export AV_SOCKET_PATH="$SOCK"              # the documented override: one endpoint, both sides
 
 REAL_AUTH="${REAL_AUTH:-0}"
 if [ "$REAL_AUTH" = "1" ]; then

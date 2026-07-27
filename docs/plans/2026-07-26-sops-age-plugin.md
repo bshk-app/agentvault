@@ -705,14 +705,37 @@ non-macOS platforms finally execute. What each risk turned into:
   `internal/transport` (named pipes) passes too. Getting that far needed
   `os.MkdirTemp("/tmp", …)` fixed in five packages: `/tmp` was pinned for macOS's
   `sun_path` limit and does not exist on Windows at all.
-- **Newly open: the rest of Windows.** The same first run failed 21 pre-existing tests
-  that had never executed anywhere — Unix permission-bit assertions (13, six packages),
-  the daemon failing to start because `internal/client` builds it without `.exe` and
-  `exec.LookPath` then cannot see it (12, the same trap the Makefile documents for
-  `age-plugin-av`), and two env-injection tests. None is a regression; all were invisible
-  while `make cross-test` only compiled. The Windows job is red until they are addressed,
-  and whether to fix them or to state that Windows is compile-only is a product decision.
-  See docs/sops.md, "Windows: what does not work yet".
+- **The rest of Windows.** *Closed — the job is green.* The same first run failed 21
+  pre-existing tests that had never executed anywhere; none was a regression, and all were
+  invisible while `make cross-test` only compiled. What each turned out to be:
+  - Unix permission-bit assertions (13, six packages) — now skipped via a per-package
+    `requirePerm` helper that drops only the *mode* comparison; the file-exists half still
+    runs on Windows. Production `chmod` calls are untouched.
+  - The daemon failing to start because `internal/client` built it without `.exe`, so
+    `exec.LookPath` could not see it (7) — the same trap the Makefile documents for
+    `age-plugin-av`, fixed with the same `exeName` idiom.
+  - Two env-injection tests (2) — a *different* cause: they embed the redirect target in
+    an `sh -c` script, and on Windows the native `C:\…` path's backslashes are eaten as
+    shell escapes, so the child wrote to a mangled name and exited 0. Fixed with
+    `filepath.ToSlash` plus quoting.
+  - The daemon end-to-end family — `cmd/age-plugin-av`'s test plus the `internal/client`
+    E2E tests — needed the product change below.
+- **Closed by a product change: no shared endpoint on Windows.** `internal/transport`
+  read `$XDG_RUNTIME_DIR` on Unix but `%LOCALAPPDATA%` on Windows, so a test could set the
+  former and dial a path derived from it while the `avd` it spawned listened on a pipe
+  derived from the latter. That was not a test defect: there was **no way to point `av`
+  and `avd` at the same endpoint on Windows**, and therefore no way to run an isolated
+  instance there the way `scripts/smoke-sops.sh` does on Unix. Fixed by adding
+  `AV_SOCKET_PATH`, consulted by `DefaultSocketPath` on every platform, with a test that
+  is deliberately not build-tagged and a doc section in docs/sops.md. The smoke script now
+  sets it too, so the Linux job exercises the override end to end.
+- **Still open: owner-only files on Windows.** The permission-bit assertions above are
+  skipped because `Mode().Perm()` cannot express `0600` on NTFS — but the *property* they
+  stand for is real and currently has no Windows expression. Making the identity, vault
+  and audit log owner-only there needs explicit ACLs (a DACL granting only the current
+  user), which Go's `os` package cannot set. Until then, on Windows those files carry
+  whatever the parent directory's inherited ACL gives them. This is a security gap, not a
+  test gap. See docs/sops.md, "Windows: what is skipped".
 - **`sops updatekeys` through the plugin.** *Closed.* `scripts/smoke-sops.sh` re-wraps a
   file, asserts the added recipient, and decrypts the result again; it runs in CI.
 - **Real `sops`, `helm secrets`, and `kustomize`+ksops.** *Closed on Linux.* The Linux job

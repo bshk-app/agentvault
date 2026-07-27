@@ -260,13 +260,7 @@ func TestWriteSopsPointerFileKeepsBackup(t *testing.T) {
 	if err != nil || !bytes.Equal(bak, original) {
 		t.Fatalf("backup = %q, %v", bak, err)
 	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("keys.txt mode = %o, want 600", perm)
-	}
+	requirePerm(t, path, 0o600)
 }
 
 // TestWriteSopsPointerFileNoBackup: declining the backup leaves no .bak behind — the whole

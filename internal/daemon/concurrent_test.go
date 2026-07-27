@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,9 +28,12 @@ func TestNewCreatesMissingParentDir(t *testing.T) {
 	}
 	defer srv.Close()
 
+	// The dir must EXIST on every platform — that is the regression this test guards.
+	// Its 0700 mode is only assertable on Unix: Go reports 0777 for any directory on
+	// Windows ($GOROOT/src/os/types_windows.go), so 0700 is not expressible on NTFS.
 	if fi, err := os.Stat(filepath.Dir(path)); err != nil {
 		t.Fatalf("parent dir not created: %v", err)
-	} else if perm := fi.Mode().Perm(); perm != 0o700 {
+	} else if perm := fi.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o700 {
 		t.Fatalf("parent dir perm = %o, want 700", perm)
 	}
 }

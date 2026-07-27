@@ -54,13 +54,7 @@ func TestInitClaudeCodeWritesFiles(t *testing.T) {
 	}
 
 	hookPath := filepath.Join(dir, ".claude/hooks/av-scrub.sh")
-	info, err := os.Stat(hookPath)
-	if err != nil {
-		t.Fatalf("hook script not written: %v", err)
-	}
-	if info.Mode().Perm() != 0o755 {
-		t.Errorf("hook mode = %o, want 0755", info.Mode().Perm())
-	}
+	requirePerm(t, hookPath, 0o755)
 	hook, _ := os.ReadFile(hookPath)
 	if !strings.HasPrefix(string(hook), "#!") {
 		t.Error("hook must start with a shebang")

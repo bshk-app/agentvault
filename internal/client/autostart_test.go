@@ -5,15 +5,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/beshkenadze/agentvault/internal/transport"
 )
 
 // TestAutostartColdPing is the cold-start integration test: no daemon is running,
 // so the client must autostart the real avd binary and then succeed.
 //
-// It builds the real avd into a short temp dir, points AV_AVD_PATH at it, and sets
-// XDG_RUNTIME_DIR to a SHORT dir under /tmp so the resolved socket path
-// (<dir>/agentvault/avd.sock) stays under the macOS 104-byte sun_path limit —
-// t.TempDir() can produce paths that exceed it.
+// It builds the real avd into a short temp dir, points AV_AVD_PATH at it, and puts both
+// sides on one endpoint with AV_SOCKET_PATH. The dir is SHORT (under /tmp) so the socket
+// path stays under the macOS 104-byte sun_path limit — t.TempDir() can produce paths that
+// exceed it.
 //
 // Cleanup is mandatory: the test must leave NO avd process running and NO stray
 // socket/lockfile behind (it spawned a detached daemon).
@@ -29,21 +31,24 @@ func TestAutostartColdPing(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
-	avd := filepath.Join(dir, "avd")
+	avd := filepath.Join(dir, exeName("avd"))
 	build := exec.Command("go", "build", "-o", avd, "github.com/beshkenadze/agentvault/cmd/avd")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build avd: %v\n%s", err, out)
 	}
 
-	t.Setenv("AV_AVD_PATH", avd)
-	t.Setenv("XDG_RUNTIME_DIR", dir) // socket resolves under this short dir
-
 	sockPath := filepath.Join(dir, "agentvault", "avd.sock")
+
+	t.Setenv("AV_AVD_PATH", avd)
+	// One endpoint for both sides. The spawned avd inherits this env and resolves the
+	// SAME path through transport.DefaultSocketPath, so client and daemon meet whatever
+	// the platform default would have been.
+	t.Setenv(transport.SocketPathEnv, sockPath)
 
 	// Always tear the spawned daemon down, even on failure: kill it, then remove
 	// the socket and lockfile so nothing leaks past the test.
 	t.Cleanup(func() {
-		_ = exec.Command("pkill", "-f", avd).Run()
+		killDaemon(avd)
 		_ = os.Remove(sockPath)
 		_ = os.Remove(sockPath + ".lock")
 	})

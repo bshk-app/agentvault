@@ -5,11 +5,33 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// requirePerm asserts a file exists and carries the given Unix permission bits.
+//
+// The MODE half is skipped on Windows: Go can only ever report 0666/0444 for a file
+// there ($GOROOT/src/os/types_windows.go), so 0600 is not expressible on NTFS. The
+// existence half still runs — the stat is deliberately before that early return — so a
+// file that was never written still fails on Windows. The production 0600 this guards is
+// real and load-bearing on Unix; only the assertion is unavailable here.
+func requirePerm(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if got := fi.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %o, want %o", path, got, want)
+	}
+}
 
 // TestEventHasNoValueField is the STRUCTURAL no-secret guarantee: the Event type must
 // expose no field that could hold a secret value. We assert the exact field set so a
@@ -122,13 +144,7 @@ func TestFileLoggerMode0600(t *testing.T) {
 	defer l.Close()
 	l.Log(Event{Kind: "issue"})
 
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("audit file mode = %o, want 0600", perm)
-	}
+	requirePerm(t, path, 0o600)
 }
 
 // TestFileLoggerConcurrent: concurrent Log calls must each produce one well-formed

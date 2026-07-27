@@ -11,9 +11,13 @@ import (
 	"path/filepath"
 )
 
-// DefaultSocketPath returns the daemon socket path: $XDG_RUNTIME_DIR/agentvault/avd.sock
-// if set, else <user-cache-dir>/agentvault/avd.sock (macOS: ~/Library/Caches/...).
+// DefaultSocketPath returns the daemon socket path: $AV_SOCKET_PATH if set, else
+// $XDG_RUNTIME_DIR/agentvault/avd.sock if set, else <user-cache-dir>/agentvault/avd.sock
+// (macOS: ~/Library/Caches/...).
 func DefaultSocketPath() (string, error) {
+	if p, ok := socketPathOverride(); ok {
+		return p, nil
+	}
 	base := os.Getenv("XDG_RUNTIME_DIR")
 	if base == "" {
 		c, err := os.UserCacheDir()

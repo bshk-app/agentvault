@@ -2,6 +2,7 @@ package client
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -20,6 +21,35 @@ func shortTempBase() string {
 		return ""
 	}
 	return "/tmp"
+}
+
+// exeName gives a binary the suffix Windows needs. The client autostarts the daemon
+// through exec, which on Windows consults PATHEXT — an extension-less avd is simply not
+// found there ("executable file not found in %PATH%"). Same trap, and same fix, as
+// cmd/age-plugin-av/main_test.go; the Makefile has documented it since the design.
+func exeName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
+// killDaemon terminates the avd built at path — and ONLY that one. These tests spawn a
+// DETACHED daemon, so leaving it running outlives the test and pins the temp dir open.
+// Matching on the full binary path (unique per test) rather than on the process name is
+// what keeps a concurrently-running package's daemon alive: `go test ./...` runs
+// cmd/age-plugin-av at the same time, and it spawns an avd of its own.
+func killDaemon(path string) {
+	if runtime.GOOS != "windows" {
+		_ = exec.Command("pkill", "-f", path).Run()
+		return
+	}
+	// No pkill on Windows, and taskkill can only match an image NAME. CIM exposes the
+	// full ExecutablePath, which is what makes this precise instead of a blanket kill.
+	_ = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		`Get-CimInstance Win32_Process -Filter "Name='avd.exe'" | `+
+			`Where-Object { $_.ExecutablePath -eq '`+path+`' } | `+
+			`ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`).Run()
 }
 
 // shortSocketPath returns a socket path under shortTempBase().

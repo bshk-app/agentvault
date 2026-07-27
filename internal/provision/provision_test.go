@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -16,15 +17,26 @@ import (
 // It must be reversible enough for the test to assert the wrapped blob is NOT plaintext.
 func stubWrap(in []byte) ([]byte, error) { return append([]byte("WRAP:"), in...), nil }
 
-// fileMode returns the file's permission bits (the 0o600 we require for both the
-// identity and the vault), failing the test if the file is missing.
-func fileMode(t *testing.T, path string) os.FileMode {
+// requirePerm asserts the file exists and carries the given Unix permission bits (the
+// 0o600 we require for both the identity and the vault).
+//
+// The MODE half is skipped on Windows: Go can only ever report 0666/0444 for a file
+// there ($GOROOT/src/os/types_windows.go), so 0600 is not expressible on NTFS. The
+// existence half still runs — the stat is deliberately before that early return, so a
+// file that was never written still fails the test on Windows. The production 0600 this
+// guards is real and load-bearing on Unix; only the assertion is unavailable here.
+func requirePerm(t *testing.T, path string, want os.FileMode) {
 	t.Helper()
 	fi, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat %s: %v", path, err)
 	}
-	return fi.Mode().Perm()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if got := fi.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %o, want %o", path, got, want)
+	}
 }
 
 // TestProvisionWrapped: with an injected Wrap and the default (auto) tier, Provision
@@ -52,12 +64,8 @@ func TestProvisionWrapped(t *testing.T) {
 	if r.VaultPath != vaultPath {
 		t.Fatalf("VaultPath = %q, want %q", r.VaultPath, vaultPath)
 	}
-	if m := fileMode(t, encPath); m != 0o600 {
-		t.Fatalf("identity.enc mode = %o, want 600", m)
-	}
-	if m := fileMode(t, vaultPath); m != 0o600 {
-		t.Fatalf("vault.age mode = %o, want 600", m)
-	}
+	requirePerm(t, encPath, 0o600)
+	requirePerm(t, vaultPath, 0o600)
 	// The identity must have gone through Wrap: the on-disk blob starts with our marker.
 	blob, err := os.ReadFile(encPath)
 	if err != nil {
@@ -109,9 +117,7 @@ func TestProvisionAutoFallbackToKeychain(t *testing.T) {
 		t.Fatalf("identity.txt should not exist after keychain fallback, stat err = %v", err)
 	}
 	// The vault is still written.
-	if m := fileMode(t, r.VaultPath); m != 0o600 {
-		t.Fatalf("vault.age mode = %o, want 600", m)
-	}
+	requirePerm(t, r.VaultPath, 0o600)
 }
 
 // TestProvisionAutoNoWrapToKeychain: auto tier with Wrap==nil goes straight to keychain
@@ -212,9 +218,7 @@ func TestProvisionExplicitKeychain(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "identity.txt")); !os.IsNotExist(err) {
 		t.Fatalf("identity.txt should not exist for keychain tier, stat err = %v", err)
 	}
-	if m := fileMode(t, r.VaultPath); m != 0o600 {
-		t.Fatalf("vault.age mode = %o, want 600", m)
-	}
+	requirePerm(t, r.VaultPath, 0o600)
 }
 
 // TestProvisionKeychainRequiresStore: Tier=keychain with a nil KeychainStore errors
@@ -252,9 +256,7 @@ func TestProvisionPlaintext(t *testing.T) {
 	if r.IdentityPath != txtPath {
 		t.Fatalf("IdentityPath = %q, want %q", r.IdentityPath, txtPath)
 	}
-	if m := fileMode(t, txtPath); m != 0o600 {
-		t.Fatalf("identity.txt mode = %o, want 600", m)
-	}
+	requirePerm(t, txtPath, 0o600)
 	if _, err := os.Stat(filepath.Join(dir, "identity.enc")); !os.IsNotExist(err) {
 		t.Fatalf("identity.enc should not exist in plaintext mode, stat err = %v", err)
 	}
