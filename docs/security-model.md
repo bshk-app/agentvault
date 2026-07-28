@@ -100,6 +100,55 @@ implemented. With the Enclave tier the key never leaves hardware, so a daemon co
 by the OS secure store and gated by the session window, but is held in process memory
 while unlocked — consistent with the cooperative-agent threat model above.
 
+## What brokering the SOPS key protects
+
+`age-plugin-av` brokers your SOPS age key the way `av run` brokers an environment variable:
+the key stays inside `avd`, and `sops` gets back only the **file key** for the one file it
+asked about — a per-file value that decrypts that file and nothing else. See
+[the SOPS guide](sops.md) for the walkthrough.
+
+Protected:
+
+- **The key is never plaintext on disk.** `keys.txt` holds an `AGE-PLUGIN-AV-1…` pointer,
+  which encodes a *recipient*, not a key. Without a running `avd` and a presence check it
+  decrypts nothing. Publish it, commit it to dotfiles, paste it in chat.
+- **The key is never in `environ`.** No `SOPS_AGE_KEY`, no `SOPS_AGE_KEY_CMD` — so it does
+  not reach the whole process tree the way an exported variable does.
+- **The key is never in the memory of `sops`, `helm`, or `kustomize`.** The X25519 unwrap
+  happens inside `avd`. Those processes hold one file key at a time and never the identity
+  that produced it.
+- **Use is gated and audited.** Decryption needs an unlocked, presence-gated session on the
+  **Secure Enclave** and **keychain** tiers; under `av setup --plaintext` the vault identity
+  is unwrapped on disk, so anyone who can read that file recovers the SOPS key with no
+  running `avd` and no presence check at all. Each unwrap that reached an identity is logged
+  with its name, tier, and outcome — never a value. A `dangerous`-tier identity costs a
+  fresh presence check per file.
+- **No plaintext copy is deleted silently.** `av sops import` reports the `.bak` it kept and
+  says the plaintext key is still in it.
+
+**Not protected — the decrypted output.** Brokering the key says nothing about what happens
+to the plaintext once `sops` hands it back:
+
+- **`helm secrets` writes decrypted values into temporary files** on their way to `helm`.
+  Those files are outside AgentVault's boundary.
+- **`sops -d` prints plaintext to stdout**, which your shell, your pipeline, and your
+  scrollback all see. `av run`'s source masking does not cover it — that masks values
+  *AgentVault issued*, and a decrypted YAML document is not one.
+- **In-cluster decryption is entirely outside AgentVault.** Flux's `kustomize-controller`
+  decrypts with its own key from a Kubernetes Secret. AgentVault covers the developer's
+  machine only.
+- **Encryption never involves AgentVault.** `sops -e` uses only the public recipients from
+  `.sops.yaml`; no private key participates, so there is nothing to broker.
+
+The guarantee is about the *key*: it stops your long-lived SOPS identity from sitting in
+plaintext where every process can read it, and it caps the blast radius of a compromised
+`sops` invocation at the files that invocation decrypted. It is not a guarantee about where
+the decrypted bytes go afterward.
+
+The vault's `sops/` namespace is reserved and enforced in the daemon: `av read`, `av add`,
+and `av rm` all refuse it, so a SOPS private key cannot be printed by the ordinary secret
+commands or overwritten by junk. `av sops` is the only way in or out.
+
 ## Access tiers (per secret)
 
 Independently of the key tier, each manifest entry has an **access tier** that controls

@@ -62,6 +62,31 @@ func TestRegistryReRegisterOverwrites(t *testing.T) {
 	}
 }
 
+// TestRegistryBackendReturnsTheRegisteredBackend: Backend hands back the very backend
+// registered under the id, and reports ok=false for one that was never registered. It
+// must also follow a re-register, since the daemon builds its SOPS store through it and
+// `av setup` swaps "file" underneath a running daemon.
+func TestRegistryBackendReturnsTheRegisteredBackend(t *testing.T) {
+	r := NewRegistry()
+	if _, ok := r.Backend("file"); ok {
+		t.Fatal("Backend reported ok for an unregistered id")
+	}
+	r.Register("file", &mockBackend{data: map[string]string{"K": "old"}})
+	r.Register("file", &mockBackend{data: map[string]string{"K": "new"}})
+
+	b, ok := r.Backend("file")
+	if !ok {
+		t.Fatal("Backend reported not-ok for a registered id")
+	}
+	got, err := b.Resolve("K")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Value != "new" {
+		t.Fatalf("value = %q, want new (Backend must follow a re-register)", got.Value)
+	}
+}
+
 func TestRegistryListNoValues(t *testing.T) {
 	r := NewRegistry()
 	r.Register("mock", &mockBackend{data: map[string]string{"A": "1", "B": "2"}})

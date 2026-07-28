@@ -1,8 +1,12 @@
-// Command smoke-seed bootstraps an isolated age-file vault for scripts/smoke-e2e.sh:
-// it generates an age identity and writes an age-encrypted vault of NAME=VALUE pairs.
-// It reuses agefile.EncryptVault so the on-disk format always matches what avd reads.
+// Command smoke-seed bootstraps an isolated age-file vault by hand: it generates an age
+// identity and writes an age-encrypted vault of NAME=VALUE pairs. It reuses
+// agefile.EncryptVault so the on-disk format always matches what avd reads.
 //
-// NOT shipped: the Homebrew formula builds only av+avd. This is a dev/smoke helper.
+// It was written for the shell smoke harness, which is no longer part of this repository;
+// nothing in the tree calls it today. It is kept as a manual helper for standing up a
+// throwaway vault when checking a real toolchain by hand.
+//
+// NOT shipped: the Homebrew formula builds only av+avd. This is a dev helper.
 package main
 
 import (

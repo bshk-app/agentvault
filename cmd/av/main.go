@@ -67,6 +67,8 @@ func main() {
 		runAdd(os.Args[2:])
 	case "rm":
 		runRm(os.Args[2:])
+	case "sops":
+		runSops(os.Args[2:])
 	case "init":
 		runInit(os.Args[2:])
 	case "setup":
@@ -82,7 +84,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av env [--env-file PATH] [--profile P] [--no-mask] -- cmd args...  (run cmd with .env av:// refs resolved + injected)\n  av read [--backend file | --profile P] NAME  (TTY only; default reads av://file/NAME, no manifest)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]  (provision the local age vault; auto-picks the best tier)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av service on|off|status  (start avd at login via the native per-user service manager)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av env [--env-file PATH] [--profile P] [--no-mask] -- cmd args...  (run cmd with .env av:// refs resolved + injected)\n  av read [--backend file | --profile P] NAME  (TTY only; default reads av://file/NAME, no manifest)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av sops keygen NAME [--tier normal|dangerous]  (generate a SOPS identity inside the vault)\n  av sops import [--from PATH] [--name NAME]  (move existing age keys out of keys.txt into the vault)\n  av sops ls\n  av sops recipient NAME | av sops identity NAME  (the age1… for .sops.yaml / the pointer for keys.txt)\n  av sops rm NAME [--force]  (DESTRUCTIVE: files encrypted to it become unreadable)\n  av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]  (provision the local age vault; auto-picks the best tier)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av service on|off|status  (start avd at login via the native per-user service manager)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
 }
 
 func runPing() {
@@ -390,6 +392,11 @@ func noPrompt() bool { return os.Getenv("AV_NO_PROMPT") != "" }
 // message to stderr. A *ipc.RPCError (from resolve) is mapped by its stable Code; a
 // *client.ErrDaemonOutdated (an agent hit a stale daemon it must not auto-restart) prints
 // its "ask a human" message; anything else is a generic failure.
+//
+// CodeLocked prints a FIXED string and discards rpc.Message on purpose: on these RPCs the
+// daemon sends ErrLocked's own "vault locked: authorization not available", which is
+// accurate and says nothing about what to do next. `av sops` is the one caller for which
+// that substitution is wrong — see sopsExitForError, which overrides this case alone.
 func exitForError(err error) int {
 	var outdated *client.ErrDaemonOutdated
 	if errors.As(err, &outdated) {

@@ -37,6 +37,15 @@ const (
 	CodeDenied       = 4 // dangerous-tier denied / no presence
 	CodeUnauthorized = 5 // peer-credential check failed
 	CodeRateLimited  = 6 // issuance rate limit tripped — mass enumeration forced a relock
+	// CodeNoMatch says "this identity cannot decrypt this file; try another". It is the
+	// ONLY code a caller iterating over identities may treat as fall-through, and it exists
+	// because prose cannot carry that decision: the sops path has two refusals that mean
+	// "try another" and three that mean "stop", and before this code all five arrived as
+	// CodeBadRequest, distinguishable only by their wording. age-plugin-av maps it to
+	// age.ErrIncorrectIdentity so age advances to the next identity in keys.txt; every
+	// other code stays a hard error the user is shown. Sniffing message text instead would
+	// swallow the very refusals the plugin exists to surface.
+	CodeNoMatch = 7
 )
 
 // ResolveParams is the client request for `resolve`. The thin av sends the raw
@@ -81,6 +90,125 @@ type RmParams struct {
 	// NoPrompt mirrors ResolveParams.NoPrompt: false auto-unlocks a locked session
 	// with one Touch ID before the delete; true (agents) returns CodeLocked instead.
 	NoPrompt bool `json:"no_prompt,omitempty"`
+}
+
+// SopsStanza is one age header stanza, ferried verbatim between age-plugin-av and the
+// daemon. It mirrors age.Stanza field for field so the plugin can hand over exactly what
+// age gave it, without interpreting a format neither side owns.
+//
+// SECURITY: Body is the WRAPPED file key — ciphertext, useless without the private key
+// the daemon holds — so it is not a secret value in the sense AddParams.Value is. It is
+// still never logged: it is the input half of an unwrap, and pairing it with anything
+// else in a log line is a favour to whoever reads that log.
+type SopsStanza struct {
+	Type string   `json:"type"`
+	Args []string `json:"args"`
+	Body []byte   `json:"body"`
+}
+
+// SopsUnwrapParams asks the daemon to unwrap one file's key. Recipient names WHICH stored
+// SOPS identity to use, so the daemon can reject a file this vault holds no key for
+// BEFORE spending a presence prompt on it — the difference between `kustomize build` over
+// a repo of other people's secrets costing zero prompts and costing one per file.
+//
+// SECURITY: Recipient is a PUBLIC key, not a secret. It carries the bech32 "age1…" TEXT
+// of the recipient (see sopsplugin.EncodeIdentity), not 32 raw bytes — Go marshals []byte
+// as base64, so what crosses the wire is base64-of-ASCII. Parse it with
+// age.ParseX25519Recipient(string(p.Recipient)); a bytes.Equal against a raw key compares
+// text to bytes and silently never matches.
+//
+// NoPrompt mirrors ResolveParams.NoPrompt: false lets a locked session be opened with one
+// Touch ID before the unwrap; true (agents, via AV_NO_PROMPT) returns CodeLocked instead
+// of blocking a machine on a biometric nobody is there to answer.
+type SopsUnwrapParams struct {
+	Recipient []byte       `json:"recipient"`
+	Stanzas   []SopsStanza `json:"stanzas"`
+	NoPrompt  bool         `json:"no_prompt,omitempty"`
+}
+
+// SopsUnwrapResult carries the per-FILE key. SECURITY: this IS a secret — but a
+// single-file one. It decrypts exactly the file whose stanzas produced it and is useless
+// for any other, which is the entire point of brokering here instead of handing over the
+// identity: a compromised `sops` learns one file's key, not every file's.
+type SopsUnwrapResult struct {
+	FileKey []byte `json:"file_key"`
+}
+
+// SopsIdentityInfo describes ONE stored SOPS identity as everything outside the daemon is
+// allowed to see it. It is the reply shape of sops_keygen and sops_put and the element of
+// sops_list, so there is exactly one answer to "what may be said about an identity".
+//
+// SECURITY: it has no field that can hold a private key, and that is the point — the same
+// reason sopsplugin.Info has none. Both public fields are derived from the key's PUBLIC
+// half: Recipient is the bech32 "age1…" text, and Identity is the AGE-PLUGIN-AV-1… pointer
+// built from it. Adding a key field here would defeat the sops/ namespace in one line.
+//
+// Identity is why these RPCs return more than a recipient. `av sops import` has to write
+// that pointer into the user's keys.txt and `av` CANNOT compute it: the encoder lives in
+// sopsplugin, which imports filippo.io/age, and TestAvStaysThin (cmd/av/deps_test.go)
+// forbids av linking either. So the daemon — which already holds the key — renders the
+// pointer, and av writes bytes it never has to understand. Without this field the thin-av
+// rule and `av sops import` cannot both hold.
+type SopsIdentityInfo struct {
+	Name      string `json:"name"`
+	Tier      string `json:"tier"`
+	Recipient string `json:"recipient"` // public: the age1… key files are encrypted to
+	Identity  string `json:"identity"`  // the AGE-PLUGIN-AV-1… pointer for keys.txt
+}
+
+// SopsKeygenParams asks the daemon to generate a NEW SOPS identity and store it under Name
+// at Tier (empty means the documented default, normal).
+//
+// SECURITY: it carries no key material in EITHER direction. The private key is generated
+// inside avd and goes straight into the vault; the reply is a SopsIdentityInfo, which
+// structurally cannot carry it. That asymmetry with SopsPutParams is deliberate — keygen is
+// the path on which a private key never exists outside this process at all.
+//
+// NoPrompt mirrors ResolveParams.NoPrompt: writing to the vault needs it open, so false
+// opens a locked session with one Touch ID and true returns CodeLocked instead.
+type SopsKeygenParams struct {
+	Name     string `json:"name"`
+	Tier     string `json:"tier,omitempty"`
+	NoPrompt bool   `json:"no_prompt,omitempty"`
+}
+
+// SopsPutParams stores an EXISTING age private key under Name at Tier — the daemon half of
+// `av sops import`, which sends one of these per key it found in the user's keys.txt.
+//
+// SECURITY: Value carries the AGE-SECRET-KEY-1… private key and is the ONLY field on the
+// whole SOPS surface that ever holds key material. Treat it exactly as AddParams.Value:
+// it travels solely over the 0600 peer-cred-gated unix socket, is never logged, never
+// echoed, and never placed in an RPCError. `av` reads it from a file the user names and
+// ferries it verbatim without parsing it — moving a string is not the same as linking age.
+type SopsPutParams struct {
+	Name     string `json:"name"`
+	Tier     string `json:"tier,omitempty"`
+	Value    []byte `json:"value"`
+	NoPrompt bool   `json:"no_prompt,omitempty"`
+}
+
+// SopsListParams asks for every stored SOPS identity. It carries only the unlock opt-out:
+// listing decrypts the vault, so it is a real read and gates like one.
+type SopsListParams struct {
+	NoPrompt bool `json:"no_prompt,omitempty"`
+}
+
+// SopsListResult is the reply for sops_list, sorted by name (Store.List sorts, so repeated
+// `av sops ls` over an unchanged vault does not reshuffle). SECURITY: it is built from
+// sopsplugin.Info, which has no key field, through a SopsIdentityInfo, which has none
+// either — no private key can reach this reply by any route.
+type SopsListResult struct {
+	Identities []SopsIdentityInfo `json:"identities"`
+}
+
+// SopsRmParams deletes the identity stored under Name. It carries no value (removal is by
+// name only), so it can never leak key material.
+//
+// The interactive "this destroys the only copy of a key" confirmation belongs to `av`, not
+// here — the daemon removes what it is told to, exactly as the `rm` RPC does.
+type SopsRmParams struct {
+	Name     string `json:"name"`
+	NoPrompt bool   `json:"no_prompt,omitempty"`
 }
 
 // ScrubParams is one chunk of a streamed scrub request. The client loops sending

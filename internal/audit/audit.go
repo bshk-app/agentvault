@@ -16,7 +16,7 @@ import (
 // structural, not just convention, so no caller can ever record a secret value.
 type Event struct {
 	Time    string `json:"time"`
-	Kind    string `json:"kind"`              // issue | unlock | lock | alert | denied
+	Kind    string `json:"kind"`              // issue | unlock | lock | alert | denied | add | rm | sops_unwrap | sops_keygen | sops_put | sops_rm
 	Name    string `json:"name,omitempty"`    // logical secret name (never the value)
 	Tier    string `json:"tier,omitempty"`    // normal | dangerous
 	Profile string `json:"profile,omitempty"` // av run profile

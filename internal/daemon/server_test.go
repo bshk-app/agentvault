@@ -8,17 +8,30 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"syscall"
 	"testing"
 
 	"github.com/beshkenadze/agentvault/internal/ipc"
 	"github.com/beshkenadze/agentvault/internal/transport"
 )
 
-// shortSocketPath returns a socket path under /tmp to stay well under the macOS
-// 104-byte sun_path limit (t.TempDir() paths are too long for unix sockets).
+// shortTempBase is the parent for a temp dir that will hold a unix socket: macOS caps
+// sun_path near 104 bytes and t.TempDir()'s /var/folders/... base blows it before the
+// test can say anything useful. Windows uses a named pipe with no such cap and has no
+// /tmp at all, so there the OS temp dir ("") is both correct and the only thing that
+// exists. Same reasoning as cmd/age-plugin-av/main_test.go.
+func shortTempBase() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	return "/tmp"
+}
+
+// shortSocketPath returns a socket path under shortTempBase().
 func shortSocketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "avd")
+	dir, err := os.MkdirTemp(shortTempBase(), "avd")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,14 +116,28 @@ func TestHandleRejectsUnverifiedPeer(t *testing.T) {
 	defer c.Close()
 
 	// Send a ping — it must NEVER be dispatched (no "pong" must ever come back).
+	//
+	// handle() deliberately never READS from an unverified peer: it writes the rejection
+	// and closes with this ping still sitting unread in the server's receive queue. Linux
+	// answers unread data with an RST, which both fails this write with EPIPE and can
+	// discard the rejection that was already in flight; macOS lets the write land and
+	// delivers a clean EOF afterwards. So on Linux the run may end at any of the three
+	// points below. Each of them proves the one thing this test is about — the request was
+	// never dispatched — and none of them may produce a pong.
 	if err := ipc.NewEncoder(c).Encode(ipc.Request{ID: 1, Method: "ping"}); err != nil {
-		t.Fatal(err)
+		if !isPeerHangup(err) {
+			t.Fatalf("unexpected write error: %v", err)
+		}
+		return // closed before the request even landed
 	}
 
 	dec := ipc.NewDecoder(c)
 	var resp ipc.Response
 	if err := dec.Decode(&resp); err != nil {
-		t.Fatalf("expected an unauthorized response, got decode error: %v", err)
+		if !isPeerHangup(err) {
+			t.Fatalf("expected an unauthorized response, got decode error: %v", err)
+		}
+		return // rejection lost to the RST; still nothing dispatched
 	}
 	// The single response must be the unauthorized rejection, not a pong result.
 	if resp.Error == nil || resp.Error.Code != ipc.CodeUnauthorized {
@@ -120,12 +147,28 @@ func TestHandleRejectsUnverifiedPeer(t *testing.T) {
 		t.Fatalf("rejected peer must not receive a dispatched result, got %s", resp.Result)
 	}
 
-	// The connection must then be CLOSED: a subsequent Decode must hit EOF, proving
-	// the ping was never dispatched and no "pong" ever follows the rejection.
+	// The connection must then be CLOSED, proving the ping was never dispatched and no
+	// "pong" ever follows the rejection. What must not happen is a successful decode.
 	var after ipc.Response
-	if err := dec.Decode(&after); !errors.Is(err, io.EOF) {
-		t.Fatalf("conn must be closed after reject (want io.EOF), got err=%v resp=%+v", err, after)
+	if err := dec.Decode(&after); !isPeerHangup(err) {
+		t.Fatalf("conn must be closed after reject, got err=%v resp=%+v", err, after)
 	}
+}
+
+// isPeerHangup reports whether err is "the server closed the connection" — as opposed to
+// a protocol error, which is a real failure.
+//
+// Which errno that close produces is the platform's choice, not the daemon's: a clean
+// io.EOF on macOS, ECONNRESET (reading) or EPIPE (writing) on Linux, where the RST that
+// answers the unread request also tears down the buffers. Asserting io.EOF alone encoded
+// a macOS detail as if it were the contract, and it failed the first time this suite ran
+// on Linux.
+func isPeerHangup(err error) bool {
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE)
 }
 
 // TestSecondInstanceRefuses asserts the single-instance liveness guard: a second

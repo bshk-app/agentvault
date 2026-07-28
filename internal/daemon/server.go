@@ -529,6 +529,14 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
 		}
+		// The reserved SOPS namespace is refused before ANYTHING else touches this request
+		// (see sops_namespace.go). It needs only the two names the client already sent, so
+		// it runs ahead of the backend lookup; and ahead of the unlock gate because a write
+		// that was always going to be refused must not cost a Touch ID — nor let a caller
+		// read the lock state off which refusal comes back.
+		if err := sopsNamespaceError(p.Backend, p.Locator); err != nil {
+			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
+		}
 		// Resolve the writable backend FIRST so a routing/config fault (unknown / read-only
 		// backend, or no local vault yet) surfaces its precise hint regardless of lock state;
 		// THEN open the session on demand before the actual write (one Touch ID, or CodeLocked
@@ -554,6 +562,11 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
 		}
+		// Reserved namespace first, same as "add" — and here it also stops `av rm sops/mykey`
+		// destroying the only copy of a SOPS private key by ordinary means.
+		if err := sopsNamespaceError(p.Backend, p.Locator); err != nil {
+			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
+		}
 		// Backend-resolution hint first (see "add"), then the on-demand unlock before Remove.
 		w, rejection := s.writer(req.ID, p.Backend)
 		if rejection != nil {
@@ -568,6 +581,25 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		s.audit.Log(audit.Event{Kind: "rm", Name: p.Locator, Profile: p.Backend})
 		ok, _ := json.Marshal("ok")
 		return ipc.Response{ID: req.ID, Result: ok}
+	case "sops_unwrap":
+		// Serves age-plugin-av: unwrap ONE file's key with a stored SOPS identity, so the
+		// SOPS private key never leaves this process. The body lives in sops_rpc.go, next
+		// to the namespace guard whose backend id it shares.
+		return s.sopsUnwrap(req)
+	// The four below are the management surface behind `av sops keygen | import | ls | rm`
+	// (sops_manage.go). They are RPCs rather than av-side code for the same reason `av setup`
+	// is one: they generate, parse and encode age keys, and av must link neither age nor
+	// sopsplugin (TestAvStaysThin). They are also the ONLY writers permitted into the sops/
+	// namespace — `av add`/`av rm` are refused there — and each writes through
+	// sopsplugin.Store, which owns the envelope format.
+	case "sops_keygen":
+		return s.sopsKeygen(req)
+	case "sops_put":
+		return s.sopsPut(req)
+	case "sops_list":
+		return s.sopsList(req)
+	case "sops_rm":
+		return s.sopsRm(req)
 	case "setup":
 		var p ipc.SetupParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {

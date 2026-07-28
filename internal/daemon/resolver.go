@@ -113,6 +113,33 @@ func (r *Resolver) Resolve(profile string, manifestBytes []byte) (map[string]str
 	}
 	out := make(map[string]string, len(p))
 	for name, e := range p {
+		// The reserved SOPS namespace is refused before ANY per-entry work: before the lock
+		// check, before a dangerous-tier presence prompt, and before the issuance budget is
+		// drawn on. See sops_namespace.go.
+		//
+		// The guard lives here rather than in the "resolve" dispatch case because THIS is
+		// where a locator first exists — dispatch holds only unparsed manifest bytes, and
+		// re-parsing them there to look would mean two parsers to keep in agreement. Sitting
+		// on the parsed entry also covers every route into the resolver at once: av read's
+		// synthetic one-entry manifest, an agentvault.yaml profile, and a `.env` line
+		// `KEY=av://file/sops/mykey` that av env turns into an entry.
+		//
+		// Returning aborts the whole resolve, so a manifest that batches a sops/ ref beside
+		// a healthy one yields NOTHING — no partial result is ever returned (see the doc
+		// comment above), so the refusal cannot be diluted by batching.
+		//
+		// One ordering difference from add/rm, which refuse the namespace before their
+		// unlock gate: dispatch's ensureUnlockedResp (server.go) runs BEFORE the resolve
+		// case reaches this code, so a LOCKED `av read sops/x` spends a presence check and
+		// comes back CodeLocked rather than CodeBadRequest. That is accepted, not
+		// overlooked — moving the guard earlier means parsing the manifest in dispatch
+		// too, and two parsers to keep in agreement is a worse trade than one wasted Touch
+		// ID on a read that fails either way. Nothing leaks: the refusal still lands
+		// before any value is fetched. Do not read add/rm's stronger ordering as covering
+		// this path.
+		if err := sopsNamespaceRefError(e.Ref); err != nil {
+			return nil, fmt.Errorf("%w: entry %q: %v", ErrBadRequest, name, err)
+		}
 		switch e.Tier {
 		case manifest.TierNormal:
 			// Served from an open session; never prompts mid-run.

@@ -5,12 +5,34 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
 	"filippo.io/age"
 	"github.com/beshkenadze/agentvault/internal/backend"
 )
+
+// requirePerm asserts a file exists and carries the given Unix permission bits.
+//
+// The MODE half is skipped on Windows: Go can only ever report 0666/0444 for a file
+// there ($GOROOT/src/os/types_windows.go), so 0600 is not expressible on NTFS. The
+// existence half still runs — the stat is deliberately before that early return — so a
+// file that was never written still fails on Windows. The production 0600 this guards is
+// real and load-bearing on Unix; only the assertion is unavailable here.
+func requirePerm(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if got := fi.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %o, want %o", path, got, want)
+	}
+}
 
 // TestAddResolvesBack: Add writes a new entry that Resolve reads back, and the
 // re-encrypted vault still decrypts with the SAME identity (recipient derived from
@@ -154,6 +176,17 @@ func TestAddIsAtomicNoTempLeftover(t *testing.T) {
 // LIVE vault is byte-for-byte unchanged (write-then-rename never touches the
 // original until the atomic rename). This is the corruption-safety invariant.
 func TestAddFailureLeavesOriginalIntact(t *testing.T) {
+	// Skipped on Windows because the way this test PROVOKES the failure does not work
+	// there, not because the invariant is Unix-only. os.Chmod on Windows sets only the
+	// read-only attribute, and on a DIRECTORY that attribute does not deny file creation
+	// — so "<path>.tmp" is still creatable, Add succeeds, and there is no failed write
+	// left to assert about. Denying it for real would need an NTFS DACL, which Go's os
+	// package cannot express. The corruption-safety invariant itself is platform-neutral
+	// and stays covered on Linux and macOS.
+	if runtime.GOOS == "windows" {
+		t.Skip("cannot make a directory un-writable via os.Chmod on Windows (NTFS DACLs, not mode bits)")
+	}
+
 	id, _ := age.GenerateX25519Identity()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "vault.age")
@@ -200,13 +233,7 @@ func TestVaultMode0600(t *testing.T) {
 	if err := b.Add("B", "2"); err != nil {
 		t.Fatal(err)
 	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("vault mode = %o, want 600", fi.Mode().Perm())
-	}
+	requirePerm(t, path, 0o600)
 }
 
 // TestAddNonX25519IdentityErrors: Add must derive the recipient from the identity.

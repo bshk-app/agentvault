@@ -8,8 +8,9 @@
 # kSecAttrTokenIDSecureEnclave, see internal/enclave/enclave_darwin.m) requires the
 # com.apple.application-identifier entitlement AUTHORIZED BY A PROVISIONING PROFILE, and a bare
 # Mach-O has nowhere to hold a profile. So `avd` is wrapped in an app-like bundle and zamokctl
-# embeds the profile (--provisioning-profile) right before signing. `av` never calls SecKey, so
-# it ships as a bare, signed+notarized binary (no entitlements, never stapled).
+# embeds the profile (--provisioning-profile) right before signing. `av` and `age-plugin-av`
+# never call SecKey — they ask avd over the socket — so both ship as bare, signed+notarized
+# binaries (no entitlements, never stapled); --entitlements applies to the bundle only.
 #
 # Prereqs:
 #   - zamokctl on PATH                          (brew install bshk-app/homebrew-tap/zamokctl)
@@ -51,6 +52,12 @@ rm -rf "$DIST"; mkdir -p "$APP/Contents/MacOS"
 echo "==> building $VERSION (unsigned; zamokctl signs)"
 CGO_ENABLED=1 go build -ldflags "-X main.version=$VERSION" -o "$DIST/av"                "$ROOT/cmd/av"
 CGO_ENABLED=1 go build -ldflags "-X main.version=$VERSION" -o "$APP/Contents/MacOS/avd" "$ROOT/cmd/avd"
+# age discovers plugins by filename on PATH, so age-plugin-av MUST land beside `av` in the
+# same tarball. An install that omits it does report it — age's `"av" plugin not found:
+# exec: "age-plugin-av": executable file not found in $PATH` survives through sops — but
+# wrapped inside the error box under a generic "no master key" summary, so it reads as a
+# broken key rather than a broken install. (Cask: packaging/agentvault-cask.json "binary".)
+CGO_ENABLED=1 go build -ldflags "-X main.version=$VERSION" -o "$DIST/age-plugin-av"      "$ROOT/cmd/age-plugin-av"
 
 # ---- assemble the avd bundle (Info.plist + entitlements file) ---------------------------
 # NOTE: do NOT embed the provisioning profile here — zamokctl embeds it (--provisioning-profile)
@@ -85,10 +92,11 @@ else
   NOTARY_ARGS=( --notary-profile "$NOTARY_PROFILE" )
 fi
 
-echo "==> zamokctl package (codesign avd.app w/ entitlements+profile; sign+notarize av; staple; tarball; manifest)"
+echo "==> zamokctl package (codesign avd.app w/ entitlements+profile; sign+notarize av + age-plugin-av; staple; tarball; manifest)"
 zamokctl package \
   --input "$APP" \
   --extra-binary "$DIST/av" \
+  --extra-binary "$DIST/age-plugin-av" \
   --entitlements "$ENTITLEMENTS" \
   --provisioning-profile "$PROFILE_PATH" \
   --format tarball \

@@ -315,6 +315,150 @@ func (c *Client) Remove(backend, locator string) error {
 	return nil
 }
 
+// SopsUnwrap issues the "sops_unwrap" RPC on behalf of age-plugin-av: it ferries one
+// file's header stanzas to the daemon and returns the per-FILE key the daemon unwrapped
+// with a stored SOPS identity. The SOPS private key never leaves avd, and the reply
+// decrypts exactly one file. There is no `av` subcommand for this — the caller is the
+// plugin, not av.
+//
+// recipient crosses as []byte rather than an *age.X25519Recipient, and the asymmetry with
+// the daemon (which parses it, so Store.FindByRecipient takes the typed value and the
+// comparison cannot go wrong there) is deliberate: this package is linked into the thin
+// av, which must import no age at all — see TestAvStaysThin in cmd/av. Parsing here would
+// drag that tree into every av invocation.
+//
+// It carries the bech32 "age1…" TEXT: pass []byte(recipient.String()) and nothing else.
+// encoding/json already base64s a []byte, so re-encoding it here would arrive as
+// base64-of-base64, fail the daemon's parse, and report every file as one this vault holds
+// no key for — the same answer a file that genuinely is not yours gets.
+//
+// SECURITY: the returned file key IS a secret. It is handed to the caller and must reach
+// no log and no error. On a daemon error it returns resp.Error (a *ipc.RPCError) so the
+// caller can map its Code — and relay its Message, which for CodeLocked is the only thing
+// separating a locked vault from a dangerous-tier identity refused under no_prompt.
+func (c *Client) SopsUnwrap(recipient []byte, stanzas []ipc.SopsStanza) ([]byte, error) {
+	if err := c.ensureFresh(); err != nil {
+		return nil, err
+	}
+	p, _ := json.Marshal(ipc.SopsUnwrapParams{Recipient: recipient, Stanzas: stanzas, NoPrompt: c.noPrompt})
+	resp, err := c.call(ipc.Request{ID: 1, Method: "sops_unwrap", Params: p})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, resp.Error
+	}
+	var r ipc.SopsUnwrapResult
+	if err := json.Unmarshal(resp.Result, &r); err != nil {
+		return nil, err
+	}
+	return r.FileKey, nil
+}
+
+// SopsKeygen issues the "sops_keygen" RPC: the daemon generates a SOPS identity, stores it
+// under name at tier ("" means the default, normal), and returns its PUBLIC half — the
+// age1… recipient plus the AGE-PLUGIN-AV-1… pointer for keys.txt.
+//
+// SECURITY: the private key is generated inside avd and never crosses this socket in either
+// direction. ipc.SopsIdentityInfo has no field that could carry one, so this method cannot
+// return a key however it is called.
+//
+// The pointer comes back ready-made because `av` cannot build one: the encoder lives in
+// internal/sopsplugin, which imports filippo.io/age, and this package is linked into the
+// thin av (TestAvStaysThin). av prints and writes that string; it never parses it.
+func (c *Client) SopsKeygen(name, tier string) (ipc.SopsIdentityInfo, error) {
+	if err := c.ensureFresh(); err != nil {
+		return ipc.SopsIdentityInfo{}, err
+	}
+	p, _ := json.Marshal(ipc.SopsKeygenParams{Name: name, Tier: tier, NoPrompt: c.noPrompt})
+	return c.sopsIdentityCall("sops_keygen", p)
+}
+
+// SopsPut issues the "sops_put" RPC: it stores an EXISTING age private key under name at
+// tier and returns the same public view SopsKeygen does. `av sops import` calls it once per
+// key it read out of the user's keys.txt.
+//
+// SECURITY: key carries the AGE-SECRET-KEY-1… private key and is the ONLY value this
+// package ever sends on the SOPS surface. It travels solely over the 0600 peer-cred-gated
+// unix socket, exactly like Add's value, and must reach no log and no error — including the
+// caller's: a failed import must not print what it was importing. av reads these bytes from
+// a file and ferries them without interpreting them, which is what keeps av free of age.
+func (c *Client) SopsPut(name, tier string, key []byte) (ipc.SopsIdentityInfo, error) {
+	if err := c.ensureFresh(); err != nil {
+		return ipc.SopsIdentityInfo{}, err
+	}
+	p, _ := json.Marshal(ipc.SopsPutParams{Name: name, Tier: tier, Value: key, NoPrompt: c.noPrompt})
+	return c.sopsIdentityCall("sops_put", p)
+}
+
+// SopsList issues the "sops_list" RPC: every stored SOPS identity, sorted by name, with its
+// tier, recipient and pointer. It is what `av sops ls` prints, and what `av sops recipient`
+// and `av sops identity` read a single field out of — those need no RPC of their own, since
+// this reply already carries both strings for every identity.
+//
+// SECURITY: the reply is built from ipc.SopsIdentityInfo, which has no key field, so
+// `av sops ls` output — a thing that lands in terminals, CI logs and screenshots — cannot
+// contain a private key.
+func (c *Client) SopsList() ([]ipc.SopsIdentityInfo, error) {
+	if err := c.ensureFresh(); err != nil {
+		return nil, err
+	}
+	p, _ := json.Marshal(ipc.SopsListParams{NoPrompt: c.noPrompt})
+	resp, err := c.call(ipc.Request{ID: 1, Method: "sops_list", Params: p})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, resp.Error
+	}
+	var r ipc.SopsListResult
+	if err := json.Unmarshal(resp.Result, &r); err != nil {
+		return nil, err
+	}
+	return r.Identities, nil
+}
+
+// SopsRemove issues the "sops_rm" RPC: it deletes the identity stored under name. It
+// carries no value, so it can never leak key material. A name nobody stored comes back as
+// resp.Error with CodeBadRequest rather than a silent success — deleting the only copy of a
+// key is not something to report over a typo.
+//
+// The daemon removes what it is told to. The "are you sure — files encrypted to this key
+// become unreadable" confirmation belongs to `av sops rm`, which is where the TTY is.
+func (c *Client) SopsRemove(name string) error {
+	if err := c.ensureFresh(); err != nil {
+		return err
+	}
+	p, _ := json.Marshal(ipc.SopsRmParams{Name: name, NoPrompt: c.noPrompt})
+	resp, err := c.call(ipc.Request{ID: 1, Method: "sops_rm", Params: p})
+	if err != nil {
+		return err
+	}
+	if resp.Error != nil {
+		return resp.Error
+	}
+	return nil
+}
+
+// sopsIdentityCall sends one already-marshaled request whose reply is a single
+// SopsIdentityInfo — the shape keygen and put share. It exists so the two cannot drift
+// apart in how they decode a reply or surface a daemon rejection (*ipc.RPCError, whose Code
+// cmd/av maps to an exit code).
+func (c *Client) sopsIdentityCall(method string, params []byte) (ipc.SopsIdentityInfo, error) {
+	resp, err := c.call(ipc.Request{ID: 1, Method: method, Params: params})
+	if err != nil {
+		return ipc.SopsIdentityInfo{}, err
+	}
+	if resp.Error != nil {
+		return ipc.SopsIdentityInfo{}, resp.Error
+	}
+	var r ipc.SopsIdentityInfo
+	if err := json.Unmarshal(resp.Result, &r); err != nil {
+		return ipc.SopsIdentityInfo{}, err
+	}
+	return r, nil
+}
+
 // Setup issues the "setup" RPC: it asks the daemon to provision the local age store
 // (identity + empty vault) and returns the on-disk paths plus whether files were created
 // this call. SECURITY: SetupParams/SetupResult carry NO secret — only two booleans and

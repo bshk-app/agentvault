@@ -19,7 +19,14 @@ import (
 // DefaultSocketPath returns a filesystem-backed logical endpoint path. On Windows the
 // actual IPC endpoint is a named pipe derived from this path, while the logical path's
 // parent remains the daemon's runtime directory for the lockfile and audit log.
+//
+// $AV_SOCKET_PATH overrides it. Note that $XDG_RUNTIME_DIR does NOT apply here — it is a
+// Unix convention this platform has no equivalent of — so the override is the only way to
+// run an isolated instance on Windows.
 func DefaultSocketPath() (string, error) {
+	if p, ok := socketPathOverride(); ok {
+		return p, nil
+	}
 	base := os.Getenv("LOCALAPPDATA")
 	if base == "" {
 		c, err := os.UserCacheDir()

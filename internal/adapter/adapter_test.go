@@ -3,9 +3,31 @@ package adapter
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// requirePerm asserts a file exists and carries the given Unix permission bits.
+//
+// The MODE half is skipped on Windows: Go can only ever report 0666/0444 for a file
+// there ($GOROOT/src/os/types_windows.go), so 0755 is not expressible on NTFS. The
+// existence half still runs — the stat is deliberately before that early return — so a
+// file that was never written still fails on Windows. The production 0755 this guards is
+// real and load-bearing on Unix; only the assertion is unavailable here.
+func requirePerm(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if got := fi.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %o, want %o", path, got, want)
+	}
+}
 
 // TestKnownAgents: the generator registry exposes the agents the design names —
 // claude-code and generic. This is the SSOT for "which agents can av init target".
@@ -206,12 +228,11 @@ func TestWriteCreatesFiles(t *testing.T) {
 	}
 	for _, f := range files {
 		p := filepath.Join(dir, f.Path)
-		info, err := os.Stat(p)
-		if err != nil {
+		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("expected %s to exist: %v", f.Path, err)
 		}
-		if f.Mode == 0o755 && info.Mode().Perm() != 0o755 {
-			t.Errorf("%s mode = %o, want 0755", f.Path, info.Mode().Perm())
+		if f.Mode == 0o755 {
+			requirePerm(t, p, 0o755)
 		}
 	}
 }

@@ -21,7 +21,12 @@ func TestAvStaysThin(t *testing.T) {
 	if !strings.Contains(string(out), self) {
 		t.Fatalf("go list returned no deps for %s; output=%q", self, out)
 	}
-	for _, bad := range []string{"gitleaks", "wazero", "spf13/viper", "spf13/afero", "filippo.io/age", "internal/audit", "internal/backend/onepassword", "internal/backend/bitwarden", "internal/backend/keychain", "internal/enclave"} {
+	// internal/sopsplugin is named directly, not left to be caught through its
+	// filippo.io/age import. That inference holds today but is not an assertion: a
+	// sopsplugin file or subpackage that happens not to import age would slip past.
+	// The SOPS design leans on this — the sops/ namespace is enforced in the daemon
+	// rather than in av precisely because av must not grow that dependency.
+	for _, bad := range []string{"gitleaks", "wazero", "spf13/viper", "spf13/afero", "filippo.io/age", "internal/audit", "internal/backend/onepassword", "internal/backend/bitwarden", "internal/backend/keychain", "internal/enclave", "internal/sopsplugin"} {
 		if strings.Contains(string(out), bad) {
 			t.Errorf("av must not link %q", bad)
 		}

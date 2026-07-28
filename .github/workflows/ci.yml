@@ -1,0 +1,87 @@
+name: ci
+
+# The test workflow. Until this existed, all 541 tests ran only on a developer's laptop:
+# `make cross-test` cross-COMPILES for linux/windows and runs nothing
+# (`-exec=/usr/bin/true`), so neither suite had ever executed on either platform. The
+# Windows job matters most — `internal/sopsplugin` carries an `.exe` discovery path
+# written specifically so it could run there, and nothing had ever run it.
+#
+# There is deliberately NO macOS job. Secure Enclave and Touch ID are unreachable on a
+# hosted runner, so the interesting macOS-only paths cannot run there anyway, and what is
+# left duplicates the Linux job.
+#
+# NOT covered here: `helm secrets` and `kustomize`+ksops against the age plugin. They are
+# ordinary sops callers, so they are expected to work — but expected is not proven, and
+# this workflow does not prove it. The harness that did was removed from the repository
+# along with the other smoke scripts; see docs/sops.md.
+
+on:
+  # Pull requests cover every branch that is up for review; `push` is limited to main so
+  # that a PR branch is not built twice for the same commit.
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A new push to a PR makes the in-flight run obsolete; cancel rather than race.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: linux (test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make test
+        run: make test
+
+      - name: make vet
+        run: make vet
+
+      # Compiles the suite for linux/amd64 and windows/amd64 without running it. The
+      # windows job below is what actually runs it; this still catches a build break in
+      # code paths neither job executes.
+      - name: make cross-test
+        run: make cross-test
+
+  windows:
+    name: windows (test)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Runs internal/sopsplugin's discovery test, whose `.exe` path exists because age
+      # locates a plugin with exec.LookPath, and on Windows LookPath only accepts a
+      # PATHEXT extension — so an extensionless age-plugin-av is invisible there. That
+      # reasoning has been in the Makefile since the design; this is what checks it.
+      #
+      # Its first run failed 21 pre-existing tests that `make cross-test` could never have
+      # caught because it only compiles. All are fixed; the two assertions that CANNOT
+      # hold on NTFS (POSIX mode bits) skip with a reason naming the real cause, and are
+      # catalogued in docs/sops.md under "Windows: what is skipped".
+      #
+      # NO `-short` and NO continue-on-error, deliberately: either would put this job back
+      # to proving nothing, which is the failure mode it exists against. In particular the
+      # daemon end-to-end tests — a real avd over a real named pipe — only run because
+      # this is a full `go test`.
+      - name: go test ./...
+        run: go test ./...

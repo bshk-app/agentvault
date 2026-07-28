@@ -12,6 +12,7 @@ These guides go deeper, task by task.
 |-------|---------------------------|
 | [Getting started](getting-started.md) | install, provision the vault (avd starts at login), store your first secret, and run a command with it — step by step |
 | [Agent integration](agent-integration.md) | wire AgentVault into Claude Code (or any agent) so its output is redacted automatically |
+| [SOPS](sops.md) | move your SOPS age key into the vault so `sops`, `helm secrets`, and `kustomize` decrypt without ever holding it |
 | [Security model](security-model.md) | understand what AgentVault does and does not protect against, and how the key is protected at rest |
 | [Platform support](platforms.md) | Linux/Windows prerequisites, service managers, and known gaps |
 | [Troubleshooting](troubleshooting.md) | fix a stuck native prompt, a locked vault, a version skew, or a confusing exit code |
@@ -25,6 +26,6 @@ These guides go deeper, task by task.
 
 ## Design notes
 
-`docs/plans/` holds the internal design and implementation plans. They record *why*
-the system is shaped the way it is; they are not user documentation and may lag the
-shipped behavior.
+The design and implementation plans are working artifacts and are not part of this
+repository. The reasoning that outlived them lives where it is checked against the code:
+in the comments at each decision site and in the commit history.
