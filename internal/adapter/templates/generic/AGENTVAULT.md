@@ -10,6 +10,8 @@ pieces into whatever hook system your agent provides.
 1. **`av-scrub.sh`** — a hook script that pipes stdin through `av scrub` (layer-2
    redaction). Run it on every context-ingress channel.
 2. **This doc** — the contract the agent must follow.
+The hook is a **redaction hook, not a blocking/validation hook**. `av run` protects
+child output at layer 1; `av scrub` protects other context-ingress channels at layer 2.
 
 ## Quick reference (exact syntax — don't guess)
 
@@ -23,6 +25,54 @@ pieces into whatever hook system your agent provides.
   `av run --profile <PROFILE> -- npm whoami`.
 - `av read [--profile <PROFILE>] <NAME>` — human-only (refuses a pipe/file); don't use it to
   fetch a value, use `av run`. If a human needs the value, they run it themselves at a TTY.
+
+## Addressing secrets: `av://<backend>/<locator>`
+
+Use AgentVault references, not 1Password references:
+
+| backend id | reference shape | writable |
+| --- | --- | --- |
+| `file` | `av://file/<NAME>` | yes — `av add` / `av rm` |
+| `1p` | `av://1p/<Vault>/<Item>/<field>` | no — resolves with `op read` |
+| `bw` | `av://bw/<object>/<id-or-search>` | no — resolves with `bw get` |
+| `keychain` | `av://keychain/<service>/<account>` | no — resolves with macOS `security` |
+
+The 1Password backend id is exactly **`1p`**, never `op`, `1password`, or
+`onepassword`. `op://…` is the scheme AgentVault constructs internally for the
+1Password CLI; write `av://1p/Vault/Item/field` in manifests and `.env` files.
+The daemon (`avd`) registers these backends; the thin `av` client does not link them.
+
+## `agentvault.yaml` is written by a human
+
+`av init` generates adapter files only; it does not create the manifest. Write
+`agentvault.yaml` at the repository root:
+
+```yaml
+profiles:
+  ci:
+    GITHUB_TOKEN:
+      ref: av://file/GITHUB_TOKEN
+      tier: normal
+    DEPLOY_KEY:
+      ref: av://1p/Eng/Deploy/private key
+      tier: dangerous
+```
+
+Every entry requires `ref` and `tier`; `tier` is exactly `normal` or `dangerous`.
+`av run --profile ci -- <command>` injects the logical names into the child.
+
+If a project already has `.env`, `av env -- <command>` can resolve references in
+place and pass literal values through:
+
+```dotenv
+GITHUB_TOKEN=av://file/GITHUB_TOKEN
+NPM_TOKEN=av://1p/Eng/npm/token
+LOG_LEVEL=debug
+```
+
+`av env` also merges the selected manifest profile (`--profile`, default `smoke`).
+A name defined in both `.env` and the manifest is an error; there is no silent
+precedence.
 
 ## Rules for the agent
 
@@ -40,10 +90,18 @@ pieces into whatever hook system your agent provides.
 - **`av read` is for a human at a TTY only.** `av read NAME` refuses unless stdout is
   a real terminal, so an agent cannot capture a value through a pipe. Use `av run`
   for credentials.
-- **A locked vault is a pause, not a failure (`AV_NO_PROMPT`).** The generated hook
-  exports `AV_NO_PROMPT=1`, so a locked vault makes `av run`/`av read`/`av add` exit
-  **69** (`EX_UNAVAILABLE`) instead of blocking on a Touch ID. Treat exit 69 as "ask a
-  human to run `av unlock`", then retry — do not try to bypass it.
+- **Request access yourself when the vault is locked (`AV_NO_PROMPT`).** The generated
+  hook exports `AV_NO_PROMPT=1`, so secret operations exit **69** (`EX_UNAVAILABLE`)
+  without prompting automatically. When `av status` reports `locked`, or an operation
+  fails because the vault is locked, tell the user you are requesting access and **run
+  `av unlock` yourself**. Do not ask the user to type the command. It requests native
+  user-presence approval, using biometrics (such as Touch ID) when available or the
+  platform's configured authentication method. The user completes the system prompt;
+  the agent only starts it. Explicit `av unlock` still requests approval with
+  `AV_NO_PROMPT=1`; keep that setting for ordinary secret operations. Wait for unlock
+  to succeed, then retry the original operation. If approval is canceled, denied, or
+  times out, or authentication is unavailable, stop the dependent operation and report
+  the result. Never bypass authentication or repeat prompts in a loop.
 
 ## Scrub-coverage contract
 

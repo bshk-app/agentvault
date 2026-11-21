@@ -11,6 +11,8 @@ on your behalf. Follow these rules.
 
 ## Quick reference (exact syntax — don't guess)
 
+- **Addressing:** every secret is an `av://<backend>/<locator>` reference. The backend
+  ids are exactly `file`, `1p`, `bw`, `keychain` — see below. Never `op://`.
 - **Find the PROFILE and logical NAMEs in `agentvault.yaml`** (read it). Never invent a
   profile/name; `av run` has no safe default profile — always pass `--profile`.
 - **Run a command that needs secrets:**
@@ -22,7 +24,74 @@ on your behalf. Follow these rules.
   then `av run --profile <PROFILE> -- npm whoami`.
 - `av read [--profile <PROFILE>] <NAME>` — **human-only** (refuses a pipe/file). Don't use
   it to fetch a value; use `av run`. If a human needs the value, they run it themselves.
-- `av status` (lock state) · `av version` (av/avd) · `av unlock` is a human action.
+- `av status` (lock state) · `av version` (av/avd).
+- **Request access yourself:** run `av unlock` to open the native approval prompt
+  (biometrics when available); the user approves it.
+
+## Addressing secrets: `av://<backend>/<locator>`
+
+Every secret is addressed by an **`av://`** reference. There are exactly four backend
+ids — any other name fails with `no backend registered for "<id>"`:
+
+| backend id | reference shape | writable | populated with |
+| --- | --- | --- | --- |
+| `file` | `av://file/<NAME>` | yes — `av add` / `av rm` | AgentVault's own age vault (`av setup`) |
+| `1p` | `av://1p/<Vault>/<Item>/<field>` | no | the 1Password app / `op` CLI |
+| `bw` | `av://bw/<object>/<id-or-search>` | no | the Bitwarden `bw` CLI |
+| `keychain` | `av://keychain/<service>/<account>` | no | macOS Keychain (`security`) |
+
+1Password's id is **`1p`** — never `op`, `1password`, or `onepassword`. `op://…` is
+1Password's OWN scheme; AgentVault builds it internally when it shells out to `op read`.
+It MUST NOT appear in `agentvault.yaml`, in a `.env`, or in any `av` command — write
+`av://1p/Vault/Item/field` instead.
+
+Only the FIRST segment after `av://` is the backend id; the locator after it may contain
+slashes and spaces, so `av://1p/Eng/GitHub CI/token` is one valid reference.
+
+Backends are resolved by the DAEMON: `avd` links them and the thin `av` client
+deliberately does not. Inspecting the `av` binary therefore proves nothing about which
+backends exist — ask the daemon (`av read --backend 1p <Vault>/<Item>/<field>`) and read
+the failure literally: `no backend registered for "op"` means the id was wrong, not that
+1Password is unsupported.
+
+Only `file` is writable. `av add` / `av rm` against `1p`, `bw`, or `keychain` fail by
+design — populate and rotate those with their own tools.
+
+## `agentvault.yaml` is written by a human, never generated
+
+`av init` generates the hook script, the hooks snippet, and this skill. It does **not**
+create `agentvault.yaml`. A missing manifest means nobody has written one yet — it is not
+a sign that profiles are unsupported. It lives at the repo root:
+
+```yaml
+profiles:
+  ci:                              # profile name -> av run --profile ci
+    GITHUB_TOKEN:                  # logical env name the child process sees
+      ref: av://file/GITHUB_TOKEN
+      tier: normal
+    DEPLOY_KEY:
+      ref: av://1p/Eng/Deploy/private key
+      tier: dangerous
+```
+
+`ref` and `tier` are both REQUIRED on every entry, and `tier` is exactly `normal` or
+`dangerous` — a missing or misspelled tier is a load error, not a default.
+
+## `av env` — the `.env` entry point
+
+A project that already keeps a `.env` needs no profile: replace each secret VALUE with an
+`av://` reference in place.
+
+```
+GITHUB_TOKEN=av://file/GITHUB_TOKEN
+NPM_TOKEN=av://1p/Eng/npm/token
+LOG_LEVEL=debug
+```
+
+`av env -- <command>` resolves every `av://` value (normal tier), passes non-reference
+lines through literally, and masks the child's output exactly like `av run`. It also
+merges the `agentvault.yaml` profile named by `--profile` (default `smoke`) when that file
+exists; a name defined in BOTH sources is a hard error, not a silent precedence.
 
 ## 1. Run commands with `av run` — never read the secret yourself
 
@@ -57,6 +126,9 @@ The generated hook (`.claude/hooks/av-scrub.sh`) pipes context-ingress text thro
 `av scrub`, which asks the daemon to redact session values and gitleaks-detected
 secrets. This is the independent second layer that catches secrets `av run` did not
 issue (e.g. a token a subprocess derived, or a value pasted into a file you read).
+This PostToolUse hook is a **redaction hook, not a blocking/validation hook**. Switching
+from `op://` to `av://` does not remove the need to wire it: `av run` protects child
+output at layer 1, while this hook protects other context-ingress channels at layer 2.
 
 ## 4. `av read` is for a human at a TTY only
 
@@ -65,12 +137,22 @@ terminal**. It will not print to a pipe or a file. Do not call `av read` to capt
 a value — it is the deliberate guard against an agent reading a secret directly. If
 you need a credential for a command, use `av run`.
 
-## 5. A locked vault is a pause, not a failure (`AV_NO_PROMPT`)
+## 5. Request access yourself when the vault is locked (`AV_NO_PROMPT`)
 
-The generated hook exports `AV_NO_PROMPT=1`, so when the vault is locked your `av
-run` / `av read` / `av add` exits **69** (`EX_UNAVAILABLE`) instead of blocking on a
-Touch ID prompt. Treat exit 69 as "ask a human to run `av unlock`", then retry —
-never try to bypass it.
+The generated hook exports `AV_NO_PROMPT=1`, so a locked vault makes secret
+operations exit **69** (`EX_UNAVAILABLE`) without prompting automatically.
+
+When `av status` reports `locked`, or an operation fails because the vault is locked,
+tell the user you are requesting access, then **run `av unlock` yourself**. Do not ask
+the user to type the command. It requests native user-presence approval, using
+biometrics (such as Touch ID) when available or the platform's configured
+authentication method. The user completes the system prompt; the agent only starts it.
+Explicit `av unlock` still requests approval with `AV_NO_PROMPT=1`; keep that setting
+for ordinary secret operations.
+
+Wait for `av unlock` to succeed, then retry the original operation. If approval is
+canceled, denied, or times out, or authentication is unavailable, stop the dependent
+operation and report the result. Never bypass authentication or repeat prompts in a loop.
 
 ---
 

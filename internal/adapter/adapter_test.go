@@ -117,9 +117,21 @@ func TestClaudeCodeSkillDoc(t *testing.T) {
 	// surface wrong — no --profile, invented profile names): the doc must teach the
 	// precise invocation, that names live in agentvault.yaml, and the config-file
 	// ${VAR}+av-run pattern (so a secret a tool reads from a file is never written to disk).
-	for _, want := range []string{"av run --profile", "agentvault.yaml", "${NPM_TOKEN}"} {
+	for _, want := range []string{
+		"av run --profile", "agentvault.yaml", "${NPM_TOKEN}",
+		"av://<backend>/<locator>", "`1p`", "`bw`", "`keychain`", "op://",
+		"tier: normal", "tier: dangerous", "av env --", "not a blocking/validation hook",
+	} {
 		if !strings.Contains(skill.Content, want) {
 			t.Errorf("skill doc must teach exact usage %q", want)
+		}
+	}
+	// The doc must explicitly close the 1Password naming/configuration loopholes:
+	// `1p` is AgentVault's backend id; `op://` is only an internal CLI scheme; init
+	// never creates the manifest.
+	for _, want := range []string{"1Password's id is **`1p`**", "written by a human, never generated"} {
+		if !strings.Contains(skill.Content, want) {
+			t.Errorf("skill doc must disambiguate %q", want)
 		}
 	}
 	// The scrub-coverage contract: the doc enumerates the context-ingress channels
@@ -177,7 +189,11 @@ func TestGenericVariant(t *testing.T) {
 		}
 		if strings.HasSuffix(f.Path, ".md") {
 			doc = true
-			for _, want := range []string{"av run", "av scrub", "{{AV:NAME}}"} {
+			for _, want := range []string{
+				"av run", "av scrub", "{{AV:NAME}}", "av://", "`1p`",
+				"op://", "agentvault.yaml", "tier: normal", "av env",
+				"not a blocking/validation hook",
+			} {
 				if !strings.Contains(f.Content, want) {
 					t.Errorf("generic doc must mention %q", want)
 				}
