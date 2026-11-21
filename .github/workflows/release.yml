@@ -48,7 +48,11 @@ jobs:
           p12-password:    ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
 
       - name: Install zamokctl
-        run: brew install bshk-app/homebrew-tap/zamokctl
+        # Homebrew refuses to load casks from an untrusted tap, which fails zamokctl's
+        # post-publish `brew audit` of bshk-app/tap/agentvault.
+        run: |
+          brew install bshk-app/homebrew-tap/zamokctl
+          brew trust --tap bshk-app/tap
 
       - name: Resolve version + signing identity + team id
         id: vars
