@@ -39,6 +39,7 @@ import (
 var version = "dev"
 
 func main() {
+	ensureToolPath()
 	path, err := transport.DefaultSocketPath()
 	if err != nil {
 		log.Fatalf("avd: socket path: %v", err)
